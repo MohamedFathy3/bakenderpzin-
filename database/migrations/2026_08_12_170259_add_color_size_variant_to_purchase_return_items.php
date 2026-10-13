@@ -19,7 +19,7 @@ return new class extends Migration
             // }
             
             if (!Schema::hasColumn('purchase_return_items', 'product_variant_id')) {
-                $table->unsignedBigInteger('product_variant_id')->nullable()->after('size_id');
+                $table->unsignedBigInteger('product_variant_id')->nullable()->after('color_id');
             }
             
             // ✅ إضافة indices

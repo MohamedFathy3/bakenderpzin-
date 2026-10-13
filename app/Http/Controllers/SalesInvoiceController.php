@@ -30,15 +30,51 @@ class SalesInvoiceController extends Controller
             $itemsData = [];
 
             foreach ($request->items as $item) {
-                $product = Product::findOrFail($item['product_id']);
+                $product = Product::whereKey($item['product_id'])->lockForUpdate()->firstOrFail();
+                $quantity = (int) $item['quantity'];
+                $unitId = $item['unit_id'] ?? null;
+                $colorId = $item['color_id'] ?? null;
+                $productUnit = null;
+                $colorStocks = collect();
 
-                // تحقق من كفاية الكمية
-                if ($product->stock < $item['quantity']) {
-                    DB::rollBack();
-                    return response()->json([
-                        'status' => false,
-                        'message' => "الكمية المتوفرة في المخزون للمنتج '{$product->name}' أقل من المطلوبة"
-                    ], 400);
+                if ($unitId !== null) {
+                    $productUnit = DB::table('product_units')
+                        ->where('product_id', $product->id)
+                        ->where('unit_id', $unitId)
+                        ->first();
+                }
+
+                $hasColorVariants = DB::table('product_unit_colors as puc')
+                    ->join('product_units as pu', 'pu.id', '=', 'puc.product_unit_id')
+                    ->where('pu.product_id', $product->id)
+                    ->whereNull('puc.deleted_at')
+                    ->exists();
+
+                if ($hasColorVariants && ($unitId === null || $colorId === null)) {
+                    throw new \RuntimeException("يجب تحديد الوحدة واللون للمنتج '{$product->name}'");
+                }
+
+                if ($colorId !== null) {
+                    if (!$productUnit) {
+                        throw new \RuntimeException("الوحدة المحددة غير مرتبطة بالمنتج '{$product->name}'");
+                    }
+
+                    $colorStocks = DB::table('product_unit_colors')
+                        ->where('product_unit_id', $productUnit->id)
+                        ->where('color_id', $colorId)
+                        ->whereNull('deleted_at')
+                        ->lockForUpdate()
+                        ->orderBy('id')
+                        ->get();
+
+                    $available = (int) $colorStocks->sum('stock');
+                    if ($colorStocks->isEmpty() || $available < $quantity) {
+                        throw new \RuntimeException("رصيد اللون المحدد للمنتج '{$product->name}' غير كافٍ (المتاح: {$available})");
+                    }
+                }
+
+                if ($colorStocks->isEmpty() && (int) $product->stock < $quantity) {
+                    throw new \RuntimeException("إجمالي المخزون للمنتج '{$product->name}' أقل من الكمية المطلوبة");
                 }
 
                 // حساب سعر المنتج بعد خصمه الفردي
@@ -48,9 +84,9 @@ class SalesInvoiceController extends Controller
 
                 $itemsData[] = [
                     'product_id' => $item['product_id'],
-                    'product_unit_id' => $item['unit_id'] ?? null,
-                    'color_id' => $item['color_id'] ?? null,
-                    'quantity' => $item['quantity'],
+                    'product_unit_id' => $unitId,
+                    'color_id' => $colorId,
+                    'quantity' => $quantity,
                     'price' => $item['price'],
                     'discount_percentage' => $itemDiscountPercentage,
                     'discount_amount' => $itemDiscountAmount,
@@ -60,7 +96,36 @@ class SalesInvoiceController extends Controller
                 $subtotal += $itemTotalAfterDiscount;
 
                 // خصم الكمية من المخزون
-                $product->decrement('stock', $item['quantity']);
+                if ($colorStocks->isNotEmpty()) {
+                    $remainingToDeduct = $quantity;
+                    foreach ($colorStocks as $colorStock) {
+                        if ($remainingToDeduct <= 0) {
+                            break;
+                        }
+                        $deduct = min($remainingToDeduct, (int) $colorStock->stock);
+                        if ($deduct > 0) {
+                            DB::table('product_unit_colors')->where('id', $colorStock->id)->decrement('stock', $deduct);
+                            $remainingToDeduct -= $deduct;
+                        }
+                    }
+
+                    $variantTotal = DB::table('product_unit_colors as puc')
+                        ->join('product_units as pu', 'pu.id', '=', 'puc.product_unit_id')
+                        ->where('pu.product_id', $product->id)
+                        ->whereNull('puc.deleted_at')
+                        ->sum('puc.stock');
+
+                    $product->update(['stock' => $variantTotal]);
+                } else {
+                    $product->decrement('stock', $quantity);
+                }
+
+                if ($request->warehouse_id) {
+                    DB::table('product_warehouse')
+                        ->where('product_id', $product->id)
+                        ->where('warehouse_id', $request->warehouse_id)
+                        ->decrement('stock', $quantity);
+                }
             }
 
             // خصم الفاتورة
@@ -135,7 +200,7 @@ class SalesInvoiceController extends Controller
                 'status' => false,
                 'message' => 'Failed to create invoice',
                 'error' => $e->getMessage()
-            ], 500);
+            ], $e instanceof \RuntimeException ? 400 : 500);
         }
     }
 

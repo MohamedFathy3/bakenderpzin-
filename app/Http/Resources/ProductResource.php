@@ -24,8 +24,9 @@ class ProductResource extends JsonResource
             'barcode'       => $this->barcode,
             'beginning_balance' => $this->beginning_balance,
 
-            // 👇 الكمية من المخزن
-            'stock'         => $this->stock ?? 0,
+            // When a product is color-tracked, its displayed total is the sum of
+            // its variant balances; otherwise retain the legacy product balance.
+            'stock'         => $this->stockFromVariants(),
 
             'reorder_level' => $this->reorder_level,
             'price'         => $this->price,
@@ -40,5 +41,14 @@ class ProductResource extends JsonResource
             'updated_at' => $this->updated_at,
         ];
     }
-}
 
+    private function stockFromVariants(): int|float
+    {
+        $units = $this->units;
+        $colors = $units->flatMap(fn ($unit) => $unit->colors);
+
+        return $colors->isNotEmpty()
+            ? $colors->sum(fn ($color) => (float) $color->stock)
+            : (float) ($this->stock ?? 0);
+    }
+}

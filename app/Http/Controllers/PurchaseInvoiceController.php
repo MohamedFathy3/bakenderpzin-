@@ -116,19 +116,27 @@ class PurchaseInvoiceController extends Controller
                     throw new \Exception('Product unit not found');
                 }
     
-                $updated = DB::table('product_unit_colors')
-                    ->where('product_unit_id', $productUnit->id)
-                    ->where('color_id', $item['color_id'])
-                    ->increment('stock', $item['quantity']);
-    
-                if (!$updated) {
-                    DB::table('product_unit_colors')->insert([
-                        'product_unit_id' => $productUnit->id,
-                        'color_id' => $item['color_id'],
-                        'stock' => $item['quantity'],
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ]);
+                if (!empty($item['color_id'])) {
+                    $colorStock = DB::table('product_unit_colors')
+                        ->where('product_unit_id', $productUnit->id)
+                        ->where('color_id', $item['color_id'])
+                        ->whereNull('deleted_at')
+                        ->lockForUpdate()
+                        ->orderBy('id')
+                        ->first();
+
+                    if ($colorStock) {
+                        DB::table('product_unit_colors')->where('id', $colorStock->id)
+                            ->increment('stock', $item['quantity']);
+                    } else {
+                        DB::table('product_unit_colors')->insert([
+                            'product_unit_id' => $productUnit->id,
+                            'color_id' => $item['color_id'],
+                            'stock' => $item['quantity'],
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    }
                 }
     
                 /*
@@ -140,7 +148,16 @@ class PurchaseInvoiceController extends Controller
                 $product = Product::find($item['product_id']);
     
                 if ($product) {
-                    $product->increment('stock', $item['quantity']);
+                    if (!empty($item['color_id'])) {
+                        $variantTotal = DB::table('product_unit_colors as puc')
+                            ->join('product_units as pu', 'pu.id', '=', 'puc.product_unit_id')
+                            ->where('pu.product_id', $product->id)
+                            ->whereNull('puc.deleted_at')
+                            ->sum('puc.stock');
+                        $product->update(['stock' => $variantTotal]);
+                    } else {
+                        $product->increment('stock', $item['quantity']);
+                    }
                 }
     
                 /*
