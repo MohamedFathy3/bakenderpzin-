@@ -7,6 +7,7 @@ use App\Http\Resources\PurchaseInvoiceResource;
 use App\Models\Product;
 use App\Models\PurchaseInvoice;
 use App\Models\PurchaseInvoiceItem;
+use App\Models\Tax;
 use App\Models\Transfer;
 use App\Models\Treasury;
 use App\Models\TreasuryTransaction;
@@ -16,6 +17,53 @@ use Illuminate\Support\Facades\Log;
 
 class PurchaseInvoiceController extends Controller
 {
+
+    private function parseTaxRate($rate): float
+    {
+        $rate = rtrim(trim((string) $rate), '%');
+
+        if ($rate === '' || !is_numeric($rate) || (float) $rate < 0 || (float) $rate > 100) {
+            throw new \InvalidArgumentException('معدل الضريبة المحدد غير صالح');
+        }
+
+        return (float) $rate;
+    }
+
+    private function calculateInvoiceTotals(array $items, float $defaultTaxRate): array
+    {
+        $subtotal = 0;
+        $discountTotal = 0;
+        $taxTotal = 0;
+        $calculatedItems = [];
+
+        foreach ($items as $index => $item) {
+            $lineSubtotal = round($item['quantity'] * $item['price'], 2);
+            $lineDiscount = round($lineSubtotal * (($item['discount'] ?? 0) / 100), 2);
+            $taxRate = $this->parseTaxRate($item['tax'] ?? $defaultTaxRate);
+            $lineTax = round(($lineSubtotal - $lineDiscount) * ($taxRate / 100), 2);
+            $lineTotal = $lineSubtotal - $lineDiscount + $lineTax;
+
+            $subtotal += $lineSubtotal;
+            $discountTotal += $lineDiscount;
+            $taxTotal += $lineTax;
+            $calculatedItems[$index] = [
+                'tax_rate' => $taxRate,
+                'total' => $lineTotal,
+            ];
+        }
+
+        $subtotal = round($subtotal, 2);
+        $discountTotal = round($discountTotal, 2);
+        $taxTotal = round($taxTotal, 2);
+
+        return [
+            'subtotal' => $subtotal,
+            'discount_total' => $discountTotal,
+            'tax_total' => $taxTotal,
+            'total' => round($subtotal - $discountTotal + $taxTotal, 2),
+            'items' => $calculatedItems,
+        ];
+    }
 
     public function store(PurchaseInvoiceRequest $request)
     {
@@ -32,27 +80,19 @@ class PurchaseInvoiceController extends Controller
             =============================
             */
     
-            $subtotal = 0;
-            $discountTotal = 0;
-            $taxTotal = 0;
-    
-            foreach ($request->items as $item) {
-    
-                $lineSubtotal = $item['quantity'] * $item['price'];
-    
-                // ✅ الخصم كنسبة مئوية (القيمة مش النسبة)
-                $lineDiscount = $lineSubtotal * (($item['discount'] ?? 0) / 100);
-    
-                // الضريبة (مبلغ ثابت)
-                $lineTax = $item['tax'] ?? 0;
-    
-                $subtotal += $lineSubtotal;
-                $discountTotal += $lineDiscount;  // ✅ مجموع الخصومات بالقيمة
-                $taxTotal += $lineTax;
-            }
-    
-            $total = $subtotal - $discountTotal + $taxTotal;
+            $defaultTaxRate = $request->tax_id
+                ? $this->parseTaxRate(Tax::findOrFail($request->tax_id)->rate)
+                : 0;
+            $totals = $this->calculateInvoiceTotals($request->items, $defaultTaxRate);
+            $subtotal = $totals['subtotal'];
+            $discountTotal = $totals['discount_total'];
+            $taxTotal = $totals['tax_total'];
+            $total = $totals['total'];
             $remaining = $total - ($request->paid_amount ?? 0);
+
+            if (($request->paid_amount ?? 0) > $total) {
+                throw new \Exception('المبلغ المدفوع أكبر من إجمالي الفاتورة');
+            }
     
             /*
             =============================
@@ -80,12 +120,7 @@ class PurchaseInvoiceController extends Controller
                 'total_amount' => $total,
             ]);
     
-            foreach ($request->items as $item) {
-    
-                $lineSubtotal = $item['quantity'] * $item['price'];
-                $lineDiscount = $lineSubtotal * (($item['discount'] ?? 0) / 100);
-                $lineTax = $item['tax'] ?? 0;
-                $lineTotal = $lineSubtotal - $lineDiscount + $lineTax;
+            foreach ($request->items as $index => $item) {
     
                 PurchaseInvoiceItem::create([
                     'purchase_invoice_id' => $invoice->id,
@@ -97,8 +132,8 @@ class PurchaseInvoiceController extends Controller
                     'color_id' => $item['color_id'] ?? null,
                     'price' => $item['price'],
                     'discount' => $item['discount'] ?? 0,  // ✅ النسبة المئوية
-                    'tax' => $item['tax'] ?? 0,
-                    'total' => $lineTotal,  // ✅ القيمة بعد الخصم والضريبة
+                    'tax' => $totals['items'][$index]['tax_rate'],
+                    'total' => $totals['items'][$index]['total'],
                 ]);
     
                 /*
@@ -195,10 +230,6 @@ class PurchaseInvoiceController extends Controller
     
                 if (!$treasury || $treasury->balance < $request->paid_amount) {
                     throw new \Exception('رصيد الخزنة غير كافي');
-                }
-    
-                if ($request->paid_amount > $total) {
-                    throw new \Exception('المبلغ المدفوع أكبر من إجمالي الفاتورة');
                 }
     
                 $treasury->decrement('balance', $request->paid_amount);
@@ -438,23 +469,19 @@ class PurchaseInvoiceController extends Controller
             $oldTreasuryId = $invoice->treasury_id;
             $oldPaymentMethod = $invoice->payment_method;
 
-            // ✅ حساب المجاميع الجديدة بشكل صحيح
-            $subtotal = 0;
-            $discountTotal = 0;
-            $taxTotal = 0;
-
-            foreach ($request->items as $item) {
-                $lineSubtotal = $item['quantity'] * $item['price'];
-                $lineDiscount = $lineSubtotal * (($item['discount'] ?? 0) / 100);
-                $lineTax = $item['tax'] ?? 0;
-
-                $subtotal += $lineSubtotal;
-                $discountTotal += $lineDiscount;
-                $taxTotal += $lineTax;
-            }
-
-            $total = $subtotal - $discountTotal + $taxTotal;
+            $defaultTaxRate = $request->tax_id
+                ? $this->parseTaxRate(Tax::findOrFail($request->tax_id)->rate)
+                : 0;
+            $totals = $this->calculateInvoiceTotals($request->items, $defaultTaxRate);
+            $subtotal = $totals['subtotal'];
+            $discountTotal = $totals['discount_total'];
+            $taxTotal = $totals['tax_total'];
+            $total = $totals['total'];
             $remaining = $total - ($request->paid_amount ?? 0);
+
+            if (($request->paid_amount ?? 0) > $total) {
+                throw new \Exception('المبلغ المدفوع أكبر من إجمالي الفاتورة');
+            }
 
             // 1️⃣ **عكس حركات المخزون القديمة**
             foreach ($invoice->items as $oldItem) {
@@ -493,12 +520,7 @@ class PurchaseInvoiceController extends Controller
             ]);
 
             // 4️⃣ **إضافة الأصناف الجديدة**
-            foreach ($request->items as $item) {
-                $lineSubtotal = $item['quantity'] * $item['price'];
-                $lineDiscount = $lineSubtotal * (($item['discount'] ?? 0) / 100);
-                $lineTax = $item['tax'] ?? 0;
-                $lineTotal = $lineSubtotal - $lineDiscount + $lineTax;
-
+            foreach ($request->items as $index => $item) {
                 PurchaseInvoiceItem::create([
                     'purchase_invoice_id' => $invoice->id,
                     'product_id' => $item['product_id'],
@@ -509,8 +531,8 @@ class PurchaseInvoiceController extends Controller
                     'color_id' => $item['color_id'] ?? null,
                     'price' => $item['price'],
                     'discount' => $item['discount'] ?? 0,
-                    'tax' => $item['tax'] ?? 0,
-                    'total' => $lineTotal,
+                    'tax' => $totals['items'][$index]['tax_rate'],
+                    'total' => $totals['items'][$index]['total'],
                 ]);
 
                 $product = Product::find($item['product_id']);

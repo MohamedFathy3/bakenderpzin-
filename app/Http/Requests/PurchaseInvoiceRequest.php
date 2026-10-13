@@ -44,7 +44,7 @@ class PurchaseInvoiceRequest extends FormRequest
             'items.*.quantity' => 'required|numeric|min:1',
             'items.*.price' => 'required|numeric|min:0',
             'items.*.discount' => 'nullable|numeric|min:0|max:100',
-            'items.*.tax' => 'nullable|numeric|min:0',
+            'items.*.tax' => 'nullable|numeric|min:0|max:100',
             'items.*.unit_id' => 'nullable|exists:units,id',
             'items.*.color_id' => 'nullable|exists:colors,id',
             'items.*.product_variant_id' => 'nullable|exists:product_variants,id',
@@ -57,6 +57,7 @@ class PurchaseInvoiceRequest extends FormRequest
             'due_date.after_or_equal' => 'تاريخ الاستحقاق يجب أن يكون بعد أو يساوي تاريخ الفاتورة.',
             'payment_method.in' => 'طريقة الدفع يجب أن تكون cash, credit, أو check',
             'items.*.discount.max' => 'نسبة الخصم لا تتجاوز 100%',
+            'items.*.tax.max' => 'نسبة الضريبة لا تتجاوز 100%',
             'items.*.quantity.min' => 'الكمية يجب أن تكون 1 على الأقل',
         ];
     }

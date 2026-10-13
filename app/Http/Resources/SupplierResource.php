@@ -12,7 +12,7 @@ class SupplierResource extends JsonResource
         $totalPurchases = $this->purchase_invoices_sum_total_amount ?? 0;
         $totalPaid = $this->purchase_invoices_sum_paid_amount ?? 0;
         $totalReturns = $this->purchase_returns_sum_total_amount
-            ?? $this->purchaseReturns()->sum('total_amount');
+            ?? $this->purchaseReturns()->sum('purchase_returns.total_amount');
         $remaining = max(0, $totalPurchases - $totalPaid - $totalReturns);
 
         return [
