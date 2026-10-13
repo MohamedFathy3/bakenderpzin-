@@ -12,4 +12,16 @@ class Supplier extends BaseModel
     {
         return $this->hasMany(PurchaseInvoice::class);
     }
+
+    public function purchaseReturns()
+    {
+        return $this->hasManyThrough(
+            PurchaseReturn::class,
+            PurchaseInvoice::class,
+            'supplier_id',
+            'purchase_invoices_id',
+            'id',
+            'id'
+        );
+    }
 }

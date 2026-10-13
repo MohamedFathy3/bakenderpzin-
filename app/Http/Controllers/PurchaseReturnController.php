@@ -163,10 +163,6 @@ class PurchaseReturnController extends Controller
                 throw new \RuntimeException('Invoice not found');
             }
 
-            if ($invoice->paid_amount <= 0) {
-                throw new \RuntimeException('لا يمكن عمل مرتجع لفاتورة غير مدفوعة');
-            }
-
             $invoiceItems = $invoice->items()->lockForUpdate()->get();
             $lines = collect($request->items)->map(function ($item) {
                 $item['product_unit_id'] = $item['product_unit_id'] ?? null;
@@ -213,16 +209,22 @@ class PurchaseReturnController extends Controller
             }
 
             $total = collect($normalizedLines)->sum(fn ($item) => $item['quantity'] * $item['unit_price']);
-            if ($total > $invoice->paid_amount) {
-                throw new \RuntimeException('قيمة المرتجع (' . $total . ') أكبر من المبلغ المدفوع (' . $invoice->paid_amount . ')');
-            }
+            // Apply the return against the supplier payable first, including on
+            // unpaid/partially-paid invoices. Refund only any excess over the debt.
+            $outstandingBeforeReturn = max(0, (float) $invoice->remaining_amount);
+            $cashRefundAmount = $invoice->payment_method === 'cash' && $invoice->treasury_id
+                ? min(
+                    max(0, (float) $total - $outstandingBeforeReturn),
+                    max(0, (float) $invoice->paid_amount)
+                )
+                : 0;
 
             $return = PurchaseReturn::create([
                 'purchase_invoices_id' => $invoice->id,
                 'return_number' => 'PR-' . now()->format('Ymd') . '-' . rand(1000, 9999),
                 'total_amount' => $total,
-                'paid_amount' => $total,
-                'payment_method' => $invoice->payment_method,
+                'paid_amount' => $cashRefundAmount,
+                'payment_method' => $cashRefundAmount > 0 ? 'cash' : 'credit',
                 'return_date' => $request->return_date ?? now()->format('Y-m-d'),
                 'reason' => $request->reason,
                 'treasury_id' => $invoice->treasury_id,
@@ -299,19 +301,19 @@ class PurchaseReturnController extends Controller
                     ->decrement('stock', $quantity);
             }
 
-            if ($invoice->payment_method === 'cash' && $invoice->treasury_id && $total > 0) {
+            if ($cashRefundAmount > 0) {
                 $treasury = Treasury::lockForUpdate()->find($invoice->treasury_id);
                 if (!$treasury) {
                     throw new \RuntimeException('الخزنة غير موجودة');
                 }
 
-                $treasury->increment('balance', $total);
+                $treasury->increment('balance', $cashRefundAmount);
 
                 Transfer::create([
                     'type' => 'treasury_deposit',
                     'treasury_id' => $invoice->treasury_id,
                     'purchase_invoice_id' => $invoice->id,
-                    'amount' => $total,
+                    'amount' => $cashRefundAmount,
                     'notes' => "مرتجع لفاتورة مشتريات رقم {$invoice->invoice_number}",
                 ]);
 
@@ -320,12 +322,12 @@ class PurchaseReturnController extends Controller
                     'reference_type' => PurchaseReturn::class,
                     'reference_id' => $return->id,
                     'type' => 'in',
-                    'amount' => $total,
+                    'amount' => $cashRefundAmount,
                     'description' => "مرتجع فاتورة مشتريات رقم {$invoice->invoice_number}",
                     'created_at' => now(),
                 ]);
 
-                $invoice->decrement('paid_amount', $total);
+                $invoice->decrement('paid_amount', $cashRefundAmount);
             }
 
             DB::commit();

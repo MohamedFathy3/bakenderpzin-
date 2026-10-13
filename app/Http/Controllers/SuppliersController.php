@@ -52,6 +52,7 @@ class SuppliersController extends BaseController
     
             $supplier = Supplier::withSum('purchaseInvoices', 'total_amount')
                 ->withSum('purchaseInvoices', 'paid_amount')
+                ->withSum('purchaseReturns', 'total_amount')
                 ->findOrFail($supplier->id);
     
             return JsonResponse::respondSuccess(
