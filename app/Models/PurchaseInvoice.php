@@ -37,10 +37,21 @@ class PurchaseInvoice extends BaseModel
     {
         return $this->hasMany(PurchaseInvoiceItem::class);
     }
+
+    public function purchaseReturns()
+    {
+        return $this->hasMany(PurchaseReturn::class, 'purchase_invoices_id');
+    }
     
     public function getRemainingAmountAttribute()
     {
-        return $this->total_amount - $this->paid_amount;
+        $returnedAmount = $this->getAttribute('purchase_returns_sum_total_amount');
+
+        if ($returnedAmount === null) {
+            $returnedAmount = $this->purchaseReturns()->sum('total_amount');
+        }
+
+        return max(0, (float) $this->total_amount - (float) $this->paid_amount - (float) $returnedAmount);
     }
 
        public function treasury()

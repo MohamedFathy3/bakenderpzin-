@@ -42,6 +42,7 @@ class PurchaseInvoiceResource extends JsonResource
             'tax_total' => (float) $this->tax_total,
             'total_amount' => (float) $this->total_amount,
             'paid_amount' => (float) $this->paid_amount,
+            'returned_amount' => (float) ($this->purchase_returns_sum_total_amount ?? 0),
             'remaining_amount' => (float) $this->remaining_amount,
 
             'items' => $this->items->map(fn ($item) => [

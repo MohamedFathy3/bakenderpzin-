@@ -213,6 +213,8 @@ class PurchaseInvoiceController extends Controller
             }
     
             DB::commit();
+
+            $invoice->loadSum('purchaseReturns', 'total_amount');
     
             return response()->json([
                 'data' => new PurchaseInvoiceResource(
@@ -254,7 +256,7 @@ class PurchaseInvoiceController extends Controller
     public function show($id)
     {
         try {
-            $invoice = PurchaseInvoice::with([
+            $invoice = PurchaseInvoice::withSum('purchaseReturns', 'total_amount')->with([
                 'supplier',
                 'branch',
                 'warehouse',
@@ -299,7 +301,7 @@ class PurchaseInvoiceController extends Controller
             $perPage = $request->input('perPage', 10);
             $paginate = $request->boolean('paginate', true);
 
-            $query = PurchaseInvoice::with([
+            $query = PurchaseInvoice::withSum('purchaseReturns', 'total_amount')->with([
                 'supplier',
                 'branch',
                 'warehouse',
@@ -565,6 +567,8 @@ class PurchaseInvoiceController extends Controller
             }
 
             DB::commit();
+
+            $invoice->loadSum('purchaseReturns', 'total_amount');
 
             return response()->json([
                 'data' => new PurchaseInvoiceResource(
