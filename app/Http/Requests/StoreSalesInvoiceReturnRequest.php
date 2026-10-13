@@ -23,15 +23,17 @@ class StoreSalesInvoiceReturnRequest extends FormRequest
     {
         return [
             'sales_invoice_id' => 'required|exists:sales_invoices,id',
+            'treasury_id' => 'nullable|exists:treasuries,id',
             'return_method' => 'required|string',
             'note' => 'nullable|string',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity' => 'required|numeric|min:1',
+            'items.*.sales_invoice_item_id' => 'nullable|integer|exists:sales_invoice_items,id',
+            'items.*.product_unit_id' => 'nullable|integer|exists:units,id',
+            'items.*.color_id' => 'nullable|integer|exists:colors,id',
+            'items.*.quantity' => 'required|integer|min:1',
             'items.*.price' => 'required|numeric|min:0',
             'items.*.reason' => 'required|string',
         ];
     }
 }
-
-

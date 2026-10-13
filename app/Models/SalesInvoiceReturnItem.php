@@ -17,6 +17,12 @@ class SalesInvoiceReturnItem extends Model
     {
         return $this->belongsTo(Product::class);
     }
+
+    public function invoiceItem()
+    {
+        return $this->belongsTo(SalesInvoiceItem::class, 'sales_invoice_item_id');
+    }
+
 public function color()
 {
     return $this->belongsTo(Color::class);

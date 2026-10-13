@@ -16,6 +16,8 @@ class SalesInvoiceReturnResource extends JsonResource
             // ✅ بيانات الفاتورة الأصلية
             'sales_invoice_id' => $this->sales_invoice_id,
             'invoice_number' => optional($this->invoice)->invoice_number,
+            'currency_code' => optional(optional($this->invoice)->currency)->code,
+            'currency_name' => optional(optional($this->invoice)->currency)->name,
             'customer' => optional(optional($this->invoice)->customer)->name,
 
             // ✅ بيانات العميل (منفصلة)
@@ -33,6 +35,7 @@ class SalesInvoiceReturnResource extends JsonResource
             'cashier_id' => $this->cashier_id,
             'cashier_name' => optional($this->cashier)->name,
             'shift_id' => $this->shift_id,
+            'shift_number' => optional($this->shift)->id,
 
             // ✅ بيانات المرتجع
             'return_method' => $this->return_method,
@@ -50,6 +53,7 @@ class SalesInvoiceReturnResource extends JsonResource
                 $discountPercentage = ($originalPrice > 0) ? ($discountAmount / $originalPrice) * 100 : 0;
 
                 return [
+                    'sales_invoice_item_id' => $item->sales_invoice_item_id,
                     // ✅ بيانات المنتج الأساسية
                     'product_id' => $item->product_id,
                     'product_name' => optional($item->product)->name,

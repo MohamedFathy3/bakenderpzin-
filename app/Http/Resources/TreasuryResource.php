@@ -20,10 +20,10 @@ class TreasuryResource extends JsonResource
             'branch' => new BranchResource($this->branch) ?? null,
             'balance' => (float) $this->balance,
             'currency' => $this->currency,
+            'currencies' => $this->currencies ?? [],
             'is_main' => $this->is_main,
             'notes' => $this->notes,
             'created_at' => $this->created_at?->toDateTimeString(),
         ];
     }
 }
-

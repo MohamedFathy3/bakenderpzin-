@@ -24,7 +24,7 @@ class Treasury extends BaseModel
         }
     }
     // دالة لجلب رصيد عملة معينة
-    public function getBalanceByCurrency($currencyId)
+    public function getBalanceByCurrency($currencyId, ?string $currencyCode = null)
     {
         $currencies = $this->currencies ?? [];
 
@@ -32,6 +32,10 @@ class Treasury extends BaseModel
             if (($currency['currency_id'] ?? null) == $currencyId) {
                 return (float)($currency['balance'] ?? 0);
             }
+        }
+
+        if ($currencyCode !== null && strcasecmp((string) $this->currency, $currencyCode) === 0) {
+            return (float) $this->balance;
         }
 
         return 0;
@@ -49,7 +53,7 @@ class Treasury extends BaseModel
         return (float) $value;
     }
     // دالة لتحديث رصيد عملة معينة
-    public function updateBalance($currencyId, $amount)
+    public function updateBalance($currencyId, $amount, ?string $currencyCode = null)
     {
         $currencies = $this->currencies ?? [];
         $found = false;
@@ -60,6 +64,13 @@ class Treasury extends BaseModel
                 $found = true;
                 break;
             }
+        }
+
+        if (!$found && $currencyCode !== null && strcasecmp((string) $this->currency, $currencyCode) === 0) {
+            $this->balance = (float) $this->balance + $amount;
+            $this->save();
+
+            return $this;
         }
 
         if (!$found) {

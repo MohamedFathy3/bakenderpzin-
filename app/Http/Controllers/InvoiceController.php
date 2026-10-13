@@ -31,6 +31,7 @@ class InvoiceController extends Controller
 
             $query = Invoice::with([
                 'customer',
+                'items.product',
                 'cashier',
                 'treasury',
                 'salesRepresentative',
@@ -128,6 +129,15 @@ class InvoiceController extends Controller
 
 public function store(Request $request)
 {
+    $request->validate([
+        'customer_id' => 'nullable|integer|exists:customers,id',
+        'redeem_points' => 'nullable|integer|min:0',
+        'total' => 'nullable|numeric|min:0',
+        'payments' => 'present|array',
+        'payments.*.method' => 'required|in:cash,card,wallet',
+        'payments.*.amount' => 'required|numeric|min:0',
+    ]);
+
     DB::beginTransaction();
     
     try {
@@ -153,15 +163,18 @@ public function store(Request $request)
             ], 400);
         }
 
-        $cashierId = $shift->employee_id;
-        $employee = Employee::with('treasury')->find($shift->employee_id);
+        $employee = $user instanceof Employee
+            ? $user->loadMissing('treasury')
+            : $shift->employee()->with('treasury')->first();
+        $cashierId = $employee?->id;
         $treasuryId = $employee?->treasury_id;
 
-        if (!$treasuryId || !$employee?->treasury) {
+        $treasury = $treasuryId ? Treasury::find($treasuryId) : null;
+        if (!$employee || !$treasury) {
             DB::rollBack();
             return response()->json([
                 'status' => false,
-                'message' => 'الموظف المرتبط بالوردية ليس لديه خزينة مخصصة.'
+                'message' => 'تعذر تحديد خزينة الموظف المرتبط بالوردية. تحقق من تعيين خزينة للموظف ثم أعد المحاولة.'
             ], 400);
         }
 
@@ -171,7 +184,7 @@ public function store(Request $request)
         $total = collect($request->items)
             ->sum(fn ($item) => $item['price'] * $item['quantity']);
 
-        $paid = collect($request->payments)->sum('amount');
+        $externalPaid = collect($request->payments)->sum('amount');
         $cashPaid = collect($request->payments)->where('method', 'cash')->sum('amount');
         $cardPaid = collect($request->payments)->where('method', 'card')->sum('amount');
         $walletPaid = collect($request->payments)
@@ -182,6 +195,58 @@ public function store(Request $request)
         $discountPercentage = $request->discount_percentage ?? 0;
         $discountAmount = ($total * $discountPercentage) / 100;
         $netTotal = $total - $discountAmount;
+        $invoiceTotal = $request->has('total') ? (float) $request->input('total') : $netTotal;
+        $redeemedPoints = (int) $request->input('redeem_points', 0);
+        $loyaltyDiscountAmount = 0;
+        $loyaltySetting = null;
+
+        if ($redeemedPoints > 0) {
+            $customer = $request->customer_id
+                ? Customer::whereKey($request->customer_id)->lockForUpdate()->first()
+                : null;
+            $loyaltySetting = LoyaltySetting::first();
+
+            if (!$customer) {
+                DB::rollBack();
+                return response()->json([
+                    'status' => false,
+                    'message' => 'يجب اختيار عميل لاستخدام نقاط الولاء.',
+                ], 422);
+            }
+
+            if (!$loyaltySetting || (float) $loyaltySetting->point_value <= 0) {
+                DB::rollBack();
+                return response()->json([
+                    'status' => false,
+                    'message' => 'إعدادات استبدال نقاط الولاء غير متاحة.',
+                ], 422);
+            }
+
+            if ((int) ($customer->point ?? 0) < $redeemedPoints) {
+                DB::rollBack();
+                return response()->json([
+                    'status' => false,
+                    'message' => 'رصيد نقاط العميل غير كافٍ.',
+                ], 422);
+            }
+
+            if ($redeemedPoints * (float) $loyaltySetting->point_value > 100) {
+                DB::rollBack();
+                return response()->json([
+                    'status' => false,
+                    'message' => 'قيمة الخصم بنقاط الولاء لا يمكن أن تتجاوز 100٪.',
+                ], 422);
+            }
+
+            $loyaltyDiscountAmount = round(
+                $invoiceTotal * $redeemedPoints * (float) $loyaltySetting->point_value / 100,
+                2
+            );
+            $customer->point = (int) $customer->point - $redeemedPoints;
+            $customer->save();
+        }
+
+        $paid = $externalPaid + $loyaltyDiscountAmount;
 
         // ============================================================
         // ✅ إنشاء الفاتورة
@@ -193,19 +258,21 @@ public function store(Request $request)
             'cashier_id'       => $cashierId,
             'treasury_id'      => $treasuryId,
             'cashier_shift_id' => $shift->id,
-            'total_amount'     => $netTotal,
+            'total_amount'     => $invoiceTotal,
             'discount_percentage' => $discountPercentage,
             'discount_amount'  => $discountAmount,
+            'loyalty_points_redeemed' => $redeemedPoints,
+            'loyalty_discount_amount' => $loyaltyDiscountAmount,
             'paid_amount'      => $paid,
-            'remaining_amount' => $netTotal - $paid,
-            'status'           => $paid >= $netTotal ? 'paid' : 'partial',
+            'remaining_amount' => max(0, $invoiceTotal - $paid),
+            'status'           => $paid >= $invoiceTotal ? 'paid' : 'partial',
         ]);
 
         // ============================================================
         // ✅ إضافة العناصر
         // ============================================================
         foreach ($request->items as $item) {
-            $product = Product::find($item['product_id']);
+            $product = Product::whereKey($item['product_id'])->lockForUpdate()->first();
 
             if (!$product) {
                 DB::rollBack();
@@ -215,12 +282,49 @@ public function store(Request $request)
                 ], 400);
             }
 
-            if ($product->stock < $item['quantity']) {
-                DB::rollBack();
-                return response()->json([
-                    'status' => false,
-                    'message' => "الكمية المتوفرة في المخزون للمنتج '{$product->name}' أقل من المطلوبة"
-                ], 400);
+            $quantity = (int) $item['quantity'];
+            $unitId = !empty($item['unit_id']) ? (int) $item['unit_id'] : null;
+            $colorId = !empty($item['color_id']) ? (int) $item['color_id'] : null;
+            $productUnit = null;
+            $colorStocks = collect();
+
+            $hasColorVariants = DB::table('product_unit_colors as puc')
+                ->join('product_units as pu', 'pu.id', '=', 'puc.product_unit_id')
+                ->where('pu.product_id', $product->id)
+                ->whereNull('puc.deleted_at')
+                ->exists();
+
+            if ($hasColorVariants && (!$unitId || !$colorId)) {
+                throw new \RuntimeException("يجب تحديد المقاس واللون للمنتج '{$product->name}'");
+            }
+
+            if ($unitId !== null) {
+                $productUnit = DB::table('product_units')
+                    ->where('product_id', $product->id)
+                    ->where('unit_id', $unitId)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$productUnit) {
+                    throw new \RuntimeException("المقاس المحدد غير مرتبط بالمنتج '{$product->name}'");
+                }
+            }
+
+            if ($colorId !== null) {
+                $colorStocks = DB::table('product_unit_colors')
+                    ->where('product_unit_id', $productUnit->id)
+                    ->where('color_id', $colorId)
+                    ->whereNull('deleted_at')
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
+
+                $available = (int) $colorStocks->sum('stock');
+                if ($colorStocks->isEmpty() || $available < $quantity) {
+                    throw new \RuntimeException("مخزون المقاس واللون المحددين للمنتج '{$product->name}' غير كافٍ (المتاح: {$available})");
+                }
+            } elseif ((int) $product->stock < $quantity) {
+                throw new \RuntimeException("الكمية المتوفرة في المخزون للمنتج '{$product->name}' أقل من المطلوبة");
             }
 
             $invoice->items()->create([
@@ -228,12 +332,39 @@ public function store(Request $request)
                 'product_name' => $item['product_name'] ?? $product->name,
                 'color'        => $item['color'] ?? null,
                 'size'         => $item['size'] ?? null,
+                'unit_id'      => $unitId,
+                'color_id'     => $colorId,
                 'quantity'     => $item['quantity'],
                 'price'        => $item['price'],
+                'cost_price'   => $productUnit?->cost_price ?? $product->cost ?? 0,
                 'total'        => $item['price'] * $item['quantity'],
             ]);
 
-            $product->decrement('stock', $item['quantity']);
+            if ($colorStocks->isNotEmpty()) {
+                $remainingToDeduct = $quantity;
+                foreach ($colorStocks as $colorStock) {
+                    if ($remainingToDeduct <= 0) {
+                        break;
+                    }
+
+                    $deduct = min($remainingToDeduct, (int) $colorStock->stock);
+                    if ($deduct > 0) {
+                        DB::table('product_unit_colors')
+                            ->where('id', $colorStock->id)
+                            ->decrement('stock', $deduct);
+                        $remainingToDeduct -= $deduct;
+                    }
+                }
+
+                $variantTotal = DB::table('product_unit_colors as puc')
+                    ->join('product_units as pu', 'pu.id', '=', 'puc.product_unit_id')
+                    ->where('pu.product_id', $product->id)
+                    ->whereNull('puc.deleted_at')
+                    ->sum('puc.stock');
+                $product->update(['stock' => $variantTotal]);
+            } else {
+                $product->decrement('stock', $quantity);
+            }
         }
 
         // ============================================================
@@ -273,7 +404,7 @@ public function store(Request $request)
         \Log::info('📊 Paid Amount: ' . $paid);
         \Log::info('👤 Customer ID: ' . $request->customer_id);
 
-        $loyaltySetting = LoyaltySetting::first();
+        $loyaltySetting = $loyaltySetting ?? LoyaltySetting::first();
         \Log::info('📊 Loyalty Settings:', [
             'exists' => $loyaltySetting ? 'Yes' : 'No',
             'point_value' => $loyaltySetting?->point_value
@@ -290,20 +421,23 @@ public function store(Request $request)
             ]);
             
             if ($customer) {
-                $earnedPoints = floor($paid * $loyaltySetting->point_value);
+                $eligiblePaid = min($externalPaid, max(0, $invoiceTotal - $loyaltyDiscountAmount));
+                $earnedPoints = (float) $loyaltySetting->points > 0
+                    ? floor($eligiblePaid / $loyaltySetting->points)
+                    : 0;
                 $oldPoints = $customer->point ?? 0;
                 $newPoints = $oldPoints + $earnedPoints;
                 
                 \Log::info('🧮 Points Calculation:', [
-                    'paid' => $paid,
-                    'point_value' => $loyaltySetting->point_value,
+                    'eligible_paid' => $eligiblePaid,
+                    'points_per_reward' => $loyaltySetting->points,
                     'earned_points' => $earnedPoints,
                     'old_points' => $oldPoints,
                     'new_points' => $newPoints
                 ]);
                 
                 $customer->point = $newPoints;
-                $customer->last_paid_amount = $paid;
+                $customer->last_paid_amount = $eligiblePaid;
                 $customer->save();
                 
                 \Log::info('✅ Points saved successfully!', [
@@ -357,7 +491,7 @@ public function store(Request $request)
         return response()->json([
             'status'  => false,
             'message' => 'حدث خطأ أثناء إنشاء الفاتورة: ' . $e->getMessage(),
-        ], 500);
+        ], $e instanceof \RuntimeException ? 400 : 500);
     }
 }
 

@@ -9,6 +9,7 @@ use App\Models\SalesInvoice;
 use App\Models\SalesInvoiceReturn;
 use App\Models\SalesInvoiceReturnItem;
 use App\Models\CashierShift;
+use App\Models\Currency;
 use App\Models\Treasury;
 use App\Models\TreasuryTransaction;
 use App\Models\LoyaltySetting;
@@ -35,7 +36,12 @@ class SalesInvoiceReturnController extends Controller
 
             $query = SalesInvoiceReturn::with([
                 'invoice.customer',
+                'invoice.currency',
                 'items.product',
+                'items.unit',
+                'items.color',
+                'cashier',
+                'shift',
                 'treasury'
             ]);
 
@@ -346,7 +352,12 @@ class SalesInvoiceReturnController extends Controller
         try {
             $return = SalesInvoiceReturn::with([
                 'invoice.customer',
+                'invoice.currency',
                 'items.product',
+                'items.unit',
+                'items.color',
+                'cashier',
+                'shift',
                 'treasury'
             ])->findOrFail($id);
 
@@ -381,7 +392,101 @@ class SalesInvoiceReturnController extends Controller
         DB::beginTransaction();
 
         try {
-            $invoice = SalesInvoice::findOrFail($request->sales_invoice_id);
+            $invoice = SalesInvoice::whereKey($request->sales_invoice_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+            $invoiceItems = $invoice->items()->orderBy('id')->lockForUpdate()->get();
+
+            if ($invoiceItems->isEmpty()) {
+                throw new \RuntimeException('الفاتورة لا تحتوي على أصناف قابلة للإرجاع');
+            }
+
+            $priorReturns = DB::table('sales_invoice_return_items as return_items')
+                ->join('sales_invoice_returns as returns', 'returns.id', '=', 'return_items.sales_invoice_return_id')
+                ->where('returns.sales_invoice_id', $invoice->id)
+                ->whereNull('returns.deleted_at')
+                ->select([
+                    'return_items.sales_invoice_item_id',
+                    'return_items.product_id',
+                    'return_items.product_unit_id',
+                    'return_items.color_id',
+                    'return_items.quantity',
+                ])
+                ->get();
+
+            $remainingByLine = [];
+            foreach ($invoiceItems as $invoiceItem) {
+                $alreadyReturned = (int) $priorReturns
+                    ->where('sales_invoice_item_id', $invoiceItem->id)
+                    ->sum('quantity');
+                $remainingByLine[$invoiceItem->id] = max(0, (int) $invoiceItem->quantity - $alreadyReturned);
+            }
+
+            $legacyReturns = $priorReturns->whereNull('sales_invoice_item_id');
+            foreach ($legacyReturns as $priorReturn) {
+                $matchingLines = $invoiceItems->filter(function ($invoiceItem) use ($priorReturn) {
+                    if ((int) $invoiceItem->product_id !== (int) $priorReturn->product_id) {
+                        return false;
+                    }
+
+                    if ($priorReturn->product_unit_id !== null
+                        && (int) $invoiceItem->product_unit_id !== (int) $priorReturn->product_unit_id) {
+                        return false;
+                    }
+
+                    return $priorReturn->color_id === null
+                        || (int) $invoiceItem->color_id === (int) $priorReturn->color_id;
+                });
+
+                $quantityToAllocate = (int) $priorReturn->quantity;
+                foreach ($matchingLines as $invoiceItem) {
+                    if ($quantityToAllocate <= 0) {
+                        break;
+                    }
+
+                    $allocated = min($quantityToAllocate, $remainingByLine[$invoiceItem->id]);
+                    $remainingByLine[$invoiceItem->id] -= $allocated;
+                    $quantityToAllocate -= $allocated;
+                }
+            }
+
+            $normalizedItems = [];
+            foreach ($request->items as $item) {
+                $invoiceItem = null;
+                if (!empty($item['sales_invoice_item_id'])) {
+                    $invoiceItem = $invoiceItems->firstWhere('id', (int) $item['sales_invoice_item_id']);
+                } else {
+                    $invoiceItem = $invoiceItems->first(function ($invoiceItem) use ($item, $remainingByLine) {
+                        return (int) $invoiceItem->product_id === (int) $item['product_id']
+                            && (int) ($invoiceItem->product_unit_id ?? 0) === (int) ($item['product_unit_id'] ?? 0)
+                            && (int) ($invoiceItem->color_id ?? 0) === (int) ($item['color_id'] ?? 0)
+                            && ($remainingByLine[$invoiceItem->id] ?? 0) >= (int) $item['quantity'];
+                    });
+                }
+
+                if (!$invoiceItem
+                    || (int) $invoiceItem->product_id !== (int) $item['product_id']
+                    || (isset($item['product_unit_id']) && (int) $invoiceItem->product_unit_id !== (int) $item['product_unit_id'])
+                    || (isset($item['color_id']) && (int) $invoiceItem->color_id !== (int) $item['color_id'])) {
+                    throw new \RuntimeException('الصنف المحدد لا يطابق أصناف الفاتورة');
+                }
+
+                $quantity = (int) $item['quantity'];
+                if ($quantity > ($remainingByLine[$invoiceItem->id] ?? 0)) {
+                    throw new \RuntimeException("كمية المرتجع تتجاوز الكمية المتبقية من المنتج '{$invoiceItem->product?->name}'");
+                }
+
+                $remainingByLine[$invoiceItem->id] -= $quantity;
+                $normalizedItems[] = [
+                    'invoice_item' => $invoiceItem,
+                    'product_id' => $invoiceItem->product_id,
+                    'product_unit_id' => $invoiceItem->product_unit_id,
+                    'color_id' => $invoiceItem->color_id,
+                    'quantity' => $quantity,
+                    'price' => (float) $invoiceItem->price,
+                    'reason' => $item['reason'] ?? null,
+                ];
+            }
 
             // ✅ تحديد treasury_id (من الطلب أو من الفاتورة الأصلية)
             $treasuryId = $request->treasury_id ?? $invoice->treasury_id;
@@ -397,7 +502,7 @@ class SalesInvoiceReturnController extends Controller
 
             $returnNumber = 'SR-' . now()->format('Ymd') . '-' . rand(1000, 9999);
 
-            $totalReturn = collect($request->items)->sum(function($item) {
+            $totalReturn = collect($normalizedItems)->sum(function($item) {
                 return $item['quantity'] * $item['price'];
             });
 
@@ -416,6 +521,15 @@ class SalesInvoiceReturnController extends Controller
                 $walletReturn = $totalReturn;
             }
 
+            $treasury = null;
+            if ($cashReturn > 0) {
+                $treasury = Treasury::whereKey($treasuryId)->lockForUpdate()->firstOrFail();
+                $currency = Currency::findOrFail($invoice->currency_id);
+                if ($treasury->getBalanceByCurrency($invoice->currency_id, $currency->code) < $cashReturn) {
+                    throw new \RuntimeException('رصيد الخزنة غير كافٍ بهذه العملة');
+                }
+            }
+
             // ✅ إنشاء المرتجع مع treasury_id
             $return = SalesInvoiceReturn::create([
                 'sales_invoice_id' => $invoice->id,
@@ -427,37 +541,74 @@ class SalesInvoiceReturnController extends Controller
             ]);
 
             // ✅ 1️⃣ زيادة المخزون
-            foreach ($request->items as $item) {
+            foreach ($normalizedItems as $item) {
                 SalesInvoiceReturnItem::create([
                     'sales_invoice_return_id' => $return->id,
+                    'sales_invoice_item_id' => $item['invoice_item']->id,
                     'product_id' => $item['product_id'],
+                    'product_unit_id' => $item['product_unit_id'],
+                    'color_id' => $item['color_id'],
                     'quantity' => $item['quantity'],
                     'price' => $item['price'],
                     'total' => $item['quantity'] * $item['price'],
                     'reason' => $item['reason'],
                 ]);
 
-                $product = Product::find($item['product_id']);
-                if ($product) {
+                $product = Product::whereKey($item['product_id'])->lockForUpdate()->firstOrFail();
+                if ($item['color_id'] !== null) {
+                    $productUnit = DB::table('product_units')
+                        ->where('product_id', $product->id)
+                        ->where('unit_id', $item['product_unit_id'])
+                        ->first();
+                    if (!$productUnit) {
+                        throw new \RuntimeException("الوحدة المحددة غير مرتبطة بالمنتج '{$product->name}'");
+                    }
+
+                    $colorStock = DB::table('product_unit_colors')
+                        ->where('product_unit_id', $productUnit->id)
+                        ->where('color_id', $item['color_id'])
+                        ->whereNull('deleted_at')
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->first();
+                    if (!$colorStock) {
+                        throw new \RuntimeException("اللون المحدد غير مرتبط بالمنتج '{$product->name}'");
+                    }
+
+                    DB::table('product_unit_colors')
+                        ->where('id', $colorStock->id)
+                        ->increment('stock', $item['quantity']);
+
+                    $variantStock = DB::table('product_unit_colors as puc')
+                        ->join('product_units as pu', 'pu.id', '=', 'puc.product_unit_id')
+                        ->where('pu.product_id', $product->id)
+                        ->whereNull('puc.deleted_at')
+                        ->sum('puc.stock');
+                    $product->update(['stock' => $variantStock]);
+                } else {
                     $product->increment('stock', $item['quantity']);
+                }
+
+                $warehouseStockUpdated = DB::table('product_warehouse')
+                    ->where('product_id', $product->id)
+                    ->where('warehouse_id', $invoice->warehouse_id)
+                    ->increment('stock', $item['quantity']);
+                if ($warehouseStockUpdated === 0) {
+                    DB::table('product_warehouse')->insertOrIgnore([
+                        'product_id' => $product->id,
+                        'warehouse_id' => $invoice->warehouse_id,
+                        'stock' => $item['quantity'],
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
                 }
             }
 
             // ✅ 2️⃣ نقصان الخزينة
             if ($cashReturn > 0 && $treasuryId) {
-                $treasury = Treasury::find($treasuryId);
-                if ($treasury) {
-                    $oldBalance = $treasury->balance;
-                    $treasury->decrement('balance', $cashReturn);
-
-                    Log::info("💰 Treasury balance decreased from return (storeReturn)", [
-                        'treasury_id' => $treasury->id,
-                        'old_balance' => $oldBalance,
-                        'new_balance' => $treasury->balance,
-                        'amount' => $cashReturn,
-                        'return_id' => $return->id,
-                    ]);
-                }
+                $currency = Currency::findOrFail($invoice->currency_id);
+                $oldBalance = $treasury->getBalanceByCurrency($invoice->currency_id, $currency->code);
+                $treasury->updateBalance($invoice->currency_id, -$cashReturn, $currency->code);
 
                 TreasuryTransaction::create([
                     'treasury_id' => $treasuryId,
@@ -468,6 +619,13 @@ class SalesInvoiceReturnController extends Controller
                     'description' => "مرتجع مبيعات رقم {$return->return_number} من الفاتورة {$invoice->invoice_number}",
                     'created_by' => auth()->id(),
                     'created_at' => now(),
+                ]);
+
+                Log::info('Treasury balance decreased for sales return', [
+                    'treasury_id' => $treasury->id,
+                    'old_balance' => $oldBalance,
+                    'amount' => $cashReturn,
+                    'return_id' => $return->id,
                 ]);
             }
 
@@ -489,7 +647,7 @@ class SalesInvoiceReturnController extends Controller
             DB::commit();
 
             return response()->json([
-                'data' => $return->load('items.product', 'invoice.customer', 'treasury'),
+                'data' => $return->load('items.product', 'items.unit', 'items.color', 'invoice.customer', 'treasury'),
                 'result' => 'Success',
                 'message' => 'Sales return created successfully',
                 'status' => 200,
@@ -506,7 +664,7 @@ class SalesInvoiceReturnController extends Controller
                 'result' => 'Error',
                 'message' => $e->getMessage(),
                 'status' => 500,
-            ], 500);
+            ], $e instanceof \RuntimeException ? 400 : 500);
         }
     }
 

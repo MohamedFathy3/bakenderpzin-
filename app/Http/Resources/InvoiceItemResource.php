@@ -14,10 +14,13 @@ class InvoiceItemResource extends JsonResource
             'product_name' => $this->product_name,
             'color'        => $this->color,
             'size'         => $this->size,
+            'unit_id'      => $this->unit_id,
+            'color_id'     => $this->color_id,
             'quantity'     => $this->quantity,
             'price'        => $this->price,
+            'cost_price'   => (float) ($this->cost_price ?? $this->product?->cost ?? 0),
+            'cost_is_estimated' => $this->cost_price === null,
             'total'        => $this->total,
         ];
     }
 }
-

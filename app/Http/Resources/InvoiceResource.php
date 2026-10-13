@@ -8,6 +8,18 @@ class InvoiceResource extends JsonResource
 {
     public function toArray($request)
     {
+        $payments = $this->payments->map(fn ($payment) => [
+            'method' => $payment->method,
+            'amount' => $payment->amount,
+        ])->values();
+
+        if ((float) ($this->loyalty_discount_amount ?? 0) > 0) {
+            $payments->push([
+                'method' => 'loyalty_points',
+                'amount' => (float) $this->loyalty_discount_amount,
+            ]);
+        }
+
         return [
             'id'               => $this->id,
             'invoice_number'   => $this->invoice_number,
@@ -48,12 +60,14 @@ class InvoiceResource extends JsonResource
             'total_amount' => (float) $this->total_amount,
             'discount_percentage' => (float) $this->discount_percentage,
             'discount_amount' => (float) $this->discount_amount,
+            'loyalty_points_redeemed' => (int) ($this->loyalty_points_redeemed ?? 0),
+            'loyalty_discount_amount' => (float) ($this->loyalty_discount_amount ?? 0),
 
 
 
             'items' => InvoiceItemResource::collection($this->items),
 
-            'payments' => InvoicePaymentResource::collection($this->payments),
+            'payments' => $payments,
 
             'created_at' => $this->created_at?->format('Y-m-d H:i'),
         ];

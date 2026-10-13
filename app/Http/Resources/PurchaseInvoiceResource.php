@@ -44,6 +44,15 @@ class PurchaseInvoiceResource extends JsonResource
             'paid_amount' => (float) $this->paid_amount,
             'returned_amount' => (float) ($this->purchase_returns_sum_total_amount ?? 0),
             'remaining_amount' => (float) $this->remaining_amount,
+            'payment_history' => $this->whenLoaded('treasuryTransactions', fn () =>
+                $this->treasuryTransactions->map(fn ($transaction) => [
+                    'id' => $transaction->id,
+                    'amount' => (float) $transaction->amount,
+                    'treasury_name' => $transaction->treasury?->name,
+                    'description' => $transaction->description,
+                    'payment_date' => $transaction->created_at?->format('Y-m-d H:i'),
+                ])->values()
+            ),
 
             'items' => $this->items->map(fn ($item) => [
                 'product_id' => $item->product_id,

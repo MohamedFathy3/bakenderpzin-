@@ -38,6 +38,7 @@ use App\Http\Controllers\TreasuryController;
 use App\Http\Controllers\UnitController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\WarehouseController;
+use App\Http\Controllers\WarehouseInventoryReportController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -138,6 +139,7 @@ Route::put('inventory-logs/{inventoryLog}/counted-stock', [WarehouseController::
 Route::get('inventory-logs/{inventoryLog}', [InventoryLogController::class, 'show']);
 Route::post('/inventory/index', [InventoryLogController::class, 'index']);
 Route::post('/warehouses/index-product', [InventoryLogController::class, 'indexProduct']);
+Route::middleware(['auth:sanctum'])->get('/inventory/warehouse-report', [WarehouseInventoryReportController::class, 'index']);
 
 //////////////////////////////////////// color ////////////////////////////////
 
@@ -241,7 +243,7 @@ Route::post('/customers/import', [CustomerController::class, 'importCustomers'])
 //////////////////////////////////////// invoice ////////////////////////////////
 //////////////////////////////////////// invoice ////////////////////////////////
 
-    Route::post('/invoice/store', [InvoiceController::class, 'store']);
+    Route::post('/invoice/store', [InvoiceController::class, 'store'])->middleware('auth:sanctum');
     Route::post('/invoice-return/store', [ReturnInvoiceController::class, 'storeReturn']);
     Route::post('/invoice-return/direct/store', [SalesInvoiceReturnController::class, 'storeDirectReturn']);
     Route::get('/invoices/search', [InvoiceController::class, 'searchByInvoiceNumber']);
@@ -406,6 +408,7 @@ Route::post('/suppliers/import', [SuppliersController::class, 'importSuppliers']
 //////////////////////////////////////// purchases-invoices ////////////////////////////////
     Route::post('/purchases-invoices/store', [PurchaseInvoiceController::class, 'store']);
     Route::post('/purchases-invoices/index', [PurchaseInvoiceController::class, 'index']);
+    Route::get('/purchases-invoices/payables', [PurchaseInvoiceController::class, 'payables']);
     Route::get('/purchases-invoices/{id}', [PurchaseInvoiceController::class, 'show']);
 
     Route::patch('purchase-invoices/{invoice}/pay', [PurchaseInvoiceController::class, 'pay']);

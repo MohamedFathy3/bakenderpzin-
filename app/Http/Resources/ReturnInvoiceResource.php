@@ -22,10 +22,18 @@ class ReturnInvoiceResource extends JsonResource
 
             'created_at' => $this->created_at->format('Y-m-d H:i'),
 
-            'items' => ReturnItemResource::collection($this->items),
+            'items' => $this->items->map(function ($item) {
+                $invoiceItems = $this->invoice?->items?->where('product_id', $item->product_id);
+                $invoiceItem = $invoiceItems?->count() === 1 ? $invoiceItems->first() : null;
+                $itemData = (new ReturnItemResource($item))->toArray(request());
+
+                $itemData['color'] = $itemData['color'] ?? $invoiceItem?->color;
+                $itemData['size'] = $itemData['size'] ?? $invoiceItem?->size;
+
+                return $itemData;
+            }),
             'invoice' => new InvoiceResource($this->invoice),
         ];
     }
 }
-
 

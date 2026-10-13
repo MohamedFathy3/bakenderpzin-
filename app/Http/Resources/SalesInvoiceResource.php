@@ -40,6 +40,8 @@ class SalesInvoiceResource extends JsonResource
             'discount_percentage' => number_format($this->discount_percentage ?? 0, 2, '.', ''),
             'discount_amount' => number_format($this->discount_amount ?? 0, 2, '.', ''),
             'net_total' => number_format($this->net_total ?? 0, 2, '.', ''),
+            'paid_amount' => (float) ($this->paid_amount ?? 0),
+            'remaining_amount' => (float) ($this->remaining_amount ?? (($this->net_total ?? 0) - ($this->paid_amount ?? 0))),
 
             'items' => $this->items->map(function ($item) {
                 $originalPrice = $item->price * $item->quantity;
@@ -47,6 +49,7 @@ class SalesInvoiceResource extends JsonResource
                 $discountPercentage = ($originalPrice > 0) ? ($discountAmount / $originalPrice) * 100 : 0;
                 
                 return [
+                    'id' => $item->id,
                     'product_id' => $item->product_id,
                     'product_name' => $item->product?->name,
                     
@@ -58,6 +61,8 @@ class SalesInvoiceResource extends JsonResource
                     
                     'quantity' => $item->quantity,
                     'price' => number_format($item->price, 2, '.', ''),
+                    'cost_price' => number_format($item->cost_price ?? $item->product?->cost ?? 0, 2, '.', ''),
+                    'cost_is_estimated' => $item->cost_price === null,
                     'discount_percentage' => number_format(
                         $item->discount_percentage > 0 ? $item->discount_percentage : $discountPercentage, 
                         2, '.', ''

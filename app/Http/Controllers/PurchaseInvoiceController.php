@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\PurchaseInvoiceRequest;
 use App\Http\Resources\PurchaseInvoiceResource;
 use App\Models\Product;
+use App\Models\Currency;
 use App\Models\PurchaseInvoice;
 use App\Models\PurchaseInvoiceItem;
 use App\Models\Tax;
@@ -142,13 +143,16 @@ class PurchaseInvoiceController extends Controller
                 =============================
                 */
     
-                $productUnit = DB::table('product_units')
-                    ->where('product_id', $item['product_id'])
-                    ->where('unit_id', $item['unit_id'])
-                    ->first();
-    
-                if (!$productUnit) {
-                    throw new \Exception('Product unit not found');
+                $productUnit = null;
+                if (!empty($item['unit_id'])) {
+                    $productUnit = DB::table('product_units')
+                        ->where('product_id', $item['product_id'])
+                        ->where('unit_id', $item['unit_id'])
+                        ->first();
+                }
+
+                if (!empty($item['color_id']) && !$productUnit) {
+                    throw new \Exception('A matching product unit is required for items with color variants');
                 }
     
                 if (!empty($item['color_id'])) {
@@ -256,6 +260,7 @@ class PurchaseInvoiceController extends Controller
                         'currency',
                         'tax',
                         'treasury',
+                        'treasuryTransactions.treasury',
                         'items.product',
                         'items.unit',
                         'items.color'
@@ -294,6 +299,7 @@ class PurchaseInvoiceController extends Controller
                 'currency',
                 'tax',
                 'treasury',
+                'treasuryTransactions.treasury',
                 'items.product',
                 'items.unit',
                 'items.color'
@@ -339,6 +345,7 @@ class PurchaseInvoiceController extends Controller
                 'currency',
                 'tax',
                 'treasury',
+                'treasuryTransactions.treasury',
                 'items.product',
                 'items.unit',
                 'items.color'
@@ -427,32 +434,132 @@ class PurchaseInvoiceController extends Controller
             ]);
         }
     }
+
+    public function payables()
+    {
+        try {
+            $returnTotals = DB::table('purchase_returns')
+                ->select('purchase_invoices_id')
+                ->selectRaw('SUM(total_amount) as total_returns')
+                ->whereNull('deleted_at')
+                ->groupBy('purchase_invoices_id');
+
+            $totalPayables = PurchaseInvoice::query()
+                ->leftJoinSub($returnTotals, 'return_totals', function ($join) {
+                    $join->on('purchase_invoices.id', '=', 'return_totals.purchase_invoices_id');
+                })
+                ->selectRaw(
+                    'COALESCE(SUM(GREATEST(purchase_invoices.total_amount - purchase_invoices.paid_amount - COALESCE(return_totals.total_returns, 0), 0)), 0) as total_payables'
+                )
+                ->value('total_payables');
+
+            return response()->json([
+                'data' => ['total_payables' => (float) $totalPayables],
+                'result' => 'Success',
+                'message' => 'Supplier payables fetched successfully',
+                'status' => 200,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Supplier payables fetch failed', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'result' => 'Error',
+                'message' => 'Failed to fetch supplier payables',
+                'status' => 500,
+            ], 500);
+        }
+    }
     
     
     // ========== pay ==========
     public function pay(Request $request, PurchaseInvoice $invoice)
     {
         $data = $request->validate([
-            'amount' => 'required|numeric|min:0.01'
+            'amount' => 'required|numeric|min:0.01',
+            'payment_method' => 'required|in:cash',
+            'treasury_id' => 'required|exists:treasuries,id',
+            'reference_number' => 'nullable|string|max:255',
+            'notes' => 'nullable|string|max:1000',
+            'payment_date' => 'nullable|date',
         ]);
-    
-        $newPaid = $invoice->paid_amount + $data['amount'];
-    
-        if ($newPaid > $invoice->total_amount) {
+
+        try {
+            $updatedInvoice = DB::transaction(function () use ($data, $invoice) {
+                $lockedInvoice = PurchaseInvoice::whereKey($invoice->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                $amount = (float) $data['amount'];
+                $remainingAmount = (float) $lockedInvoice->remaining_amount;
+
+                if ($amount > $remainingAmount) {
+                    throw \Illuminate\Validation\ValidationException::withMessages([
+                        'amount' => ['Amount exceeds the remaining invoice balance'],
+                    ]);
+                }
+
+                $treasury = Treasury::whereKey($data['treasury_id'])
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                $currencyId = $lockedInvoice->currency_id;
+                $currencyCode = Currency::findOrFail($currencyId)->code;
+                $treasuryBalance = $treasury->getBalanceByCurrency($currencyId, $currencyCode);
+
+                if ($treasuryBalance < $amount) {
+                    throw \Illuminate\Validation\ValidationException::withMessages([
+                        'treasury_id' => ['رصيد الخزنة غير كافٍ بهذه العملة'],
+                    ]);
+                }
+
+                $treasury->updateBalance($currencyId, -$amount, $currencyCode);
+                $lockedInvoice->increment('paid_amount', $amount);
+                $lockedInvoice->update([
+                    'treasury_id' => $treasury->id,
+                    'payment_method' => 'cash',
+                ]);
+
+                $description = "دفعة نقدية لفاتورة مشتريات رقم {$lockedInvoice->invoice_number}";
+                if (!empty($data['reference_number'])) {
+                    $description .= " - مرجع: {$data['reference_number']}";
+                }
+                if (!empty($data['notes'])) {
+                    $description .= " - {$data['notes']}";
+                }
+
+                TreasuryTransaction::create([
+                    'treasury_id' => $treasury->id,
+                    'reference_type' => PurchaseInvoice::class,
+                    'reference_id' => $lockedInvoice->id,
+                    'type' => 'out',
+                    'amount' => $amount,
+                    'description' => $description,
+                    'created_at' => $data['payment_date'] ?? now(),
+                ]);
+
+                return $lockedInvoice->fresh();
+            });
+
             return response()->json([
-                'message' => 'Amount exceeds total invoice value'
-            ], 422);
+                'message' => 'Payment updated successfully',
+                'invoice' => $updatedInvoice,
+                'remaining' => $updatedInvoice->remaining_amount,
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            throw $e;
+        } catch (\Exception $e) {
+            Log::error('Purchase invoice payment failed', [
+                'invoice_id' => $invoice->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'message' => 'Failed to record purchase invoice payment',
+            ], 500);
         }
-    
-        $invoice->update([
-            'paid_amount' => $newPaid
-        ]);
-    
-        return response()->json([
-            'message' => 'Payment updated successfully',
-            'invoice' => $invoice,
-            'remaining' => $invoice->remaining_amount
-        ]);
     }
 
     // ========== update ==========

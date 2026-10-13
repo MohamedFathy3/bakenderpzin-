@@ -88,6 +88,7 @@ class SalesInvoiceController extends Controller
                     'color_id' => $colorId,
                     'quantity' => $quantity,
                     'price' => $item['price'],
+                    'cost_price' => $productUnit?->cost_price ?? $product->cost ?? 0,
                     'discount_percentage' => $itemDiscountPercentage,
                     'discount_amount' => $itemDiscountAmount,
                     'total' => $itemTotalAfterDiscount,
@@ -321,6 +322,7 @@ class SalesInvoiceController extends Controller
 
             $query = SalesInvoice::with([
                 'customer',
+                'items.product',
                 'salesRepresentative',
                 'branch',
                 'warehouse',
