@@ -328,6 +328,7 @@ class PurchaseReturnController extends Controller
                 ]);
 
                 $invoice->decrement('paid_amount', $cashRefundAmount);
+                $invoice->refresh()->syncPaidExpense();
             }
 
             DB::commit();

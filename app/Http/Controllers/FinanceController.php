@@ -78,6 +78,10 @@ class FinanceController extends BaseController
     // ✅ دالة التعديل (بتتعامل مع تغيير الخزينة أو المبلغ بذكاء)
     public function update(FinanceRequest $request, Finance $Finance)
     {
+        if ($Finance->purchase_invoice_id) {
+            return JsonResponse::respondError('يتم تحديث هذا المصروف تلقائياً من فاتورة المشتريات');
+        }
+
         DB::beginTransaction();
         try {
             // 1. الحصول على القيم القديمة قبل التعديل
@@ -133,6 +137,10 @@ class FinanceController extends BaseController
             foreach ($items as $id) {
                 $finance = Finance::find($id);
                 if ($finance) {
+                    if ($finance->purchase_invoice_id) {
+                        throw new Exception('يتم إدارة مصروف فاتورة المشتريات من الفاتورة نفسها');
+                    }
+
                     // ✅ إعادة الرصيد للخزينة عند حذف المصروف
                     if ($finance->treasury_id) {
                         $this->increaseTreasuryBalance($finance, $finance->treasury_id, $finance->amount);
@@ -157,6 +165,15 @@ class FinanceController extends BaseController
     public function restore(Request $request): \Illuminate\Http\JsonResponse
     {
         try {
+            $hasPurchaseExpense = Finance::withTrashed()
+                ->whereIn('id', $request['items'])
+                ->whereNotNull('purchase_invoice_id')
+                ->exists();
+
+            if ($hasPurchaseExpense) {
+                return JsonResponse::respondError('يتم إدارة مصروف فاتورة المشتريات من الفاتورة نفسها');
+            }
+
             $this->crudRepository->restoreItem(Finance::class, $request['items']);
             return JsonResponse::respondSuccess(trans(JsonResponse::MSG_RESTORED_SUCCESSFULLY));
         } catch (Exception $e) {
@@ -167,6 +184,15 @@ class FinanceController extends BaseController
     public function forceDelete(Request $request): \Illuminate\Http\JsonResponse
     {
         try {
+            $hasPurchaseExpense = Finance::withTrashed()
+                ->whereIn('id', $request['items'])
+                ->whereNotNull('purchase_invoice_id')
+                ->exists();
+
+            if ($hasPurchaseExpense) {
+                return JsonResponse::respondError('يتم إدارة مصروف فاتورة المشتريات من الفاتورة نفسها');
+            }
+
             $this->crudRepository->deleteRecordsFinial(Finance::class, $request['items']);
             return JsonResponse::respondSuccess(trans(JsonResponse::MSG_FORCE_DELETED_SUCCESSFULLY));
         } catch (Exception $e) {

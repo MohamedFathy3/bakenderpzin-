@@ -15,7 +15,7 @@ class FinanceRequest extends FormRequest
     public function rules()
     {
         return [
-            'category' => ['required', 'string', Rule::in(['rent', 'utilities', 'salaries', 'supplies', 'marketing', 'maintenance', 'transport', 'insurance', 'taxes', 'other'])],
+            'category' => ['required', 'string', Rule::in(['rent', 'utilities', 'salaries', 'supplies', 'purchases', 'marketing', 'maintenance', 'transport', 'insurance', 'taxes', 'other'])],
             'amount' => 'required|numeric|min:0.01',
             'description' => 'nullable|string|max:1000',
             'date' => 'required|date',

@@ -15,6 +15,7 @@ use App\Models\TreasuryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 
 class PurchaseInvoiceController extends Controller
 {
@@ -64,6 +65,253 @@ class PurchaseInvoiceController extends Controller
             'total' => round($subtotal - $discountTotal + $taxTotal, 2),
             'items' => $calculatedItems,
         ];
+    }
+
+    private function recordInvoicePayment(
+        PurchaseInvoice $invoice,
+        int $treasuryId,
+        int $currencyId,
+        float $amount,
+        string $description
+    ): void {
+        if ($amount <= 0) {
+            return;
+        }
+
+        $currency = Currency::findOrFail($currencyId);
+        $treasury = Treasury::whereKey($treasuryId)->lockForUpdate()->firstOrFail();
+        $balance = $treasury->getBalanceByCurrency($currencyId, $currency->code);
+
+        if ($balance < $amount) {
+            throw ValidationException::withMessages([
+                'paid_amount' => ['رصيد الخزنة غير كافٍ بهذه العملة'],
+            ]);
+        }
+
+        $treasury->updateBalance($currencyId, -$amount, $currency->code);
+
+        TreasuryTransaction::create([
+            'treasury_id' => $treasury->id,
+            'reference_type' => PurchaseInvoice::class,
+            'reference_id' => $invoice->id,
+            'type' => 'out',
+            'amount' => $amount,
+            'description' => $description,
+        ]);
+
+        Transfer::create([
+            'type' => 'treasury_withdraw',
+            'from_treasury_id' => $treasury->id,
+            'purchase_invoice_id' => $invoice->id,
+            'amount' => $amount,
+            'currency' => $currency->code,
+            'notes' => $description,
+            'created_by' => auth()->id(),
+        ]);
+    }
+
+    private function resolvePurchaseProductUnit(int $productId, ?int $unitId, ?int $colorId)
+    {
+        $hasColorVariants = DB::table('product_unit_colors as puc')
+            ->join('product_units as pu', 'pu.id', '=', 'puc.product_unit_id')
+            ->where('pu.product_id', $productId)
+            ->whereNull('puc.deleted_at')
+            ->exists();
+
+        if ($hasColorVariants && (!$unitId || !$colorId)) {
+            throw new \RuntimeException('يجب تحديد الوحدة واللون للمنتج ذي المتغيرات');
+        }
+
+        if ($colorId === null) {
+            return null;
+        }
+
+        $productUnit = DB::table('product_units')
+            ->where('product_id', $productId)
+            ->where('unit_id', $unitId)
+            ->first();
+
+        if (!$productUnit) {
+            throw new \RuntimeException('الوحدة المحددة غير مرتبطة بالمنتج');
+        }
+
+        $colorExists = DB::table('product_unit_colors')
+            ->where('product_unit_id', $productUnit->id)
+            ->where('color_id', $colorId)
+            ->whereNull('deleted_at')
+            ->exists();
+
+        if (!$colorExists) {
+            throw new \RuntimeException('اللون المحدد غير مرتبط بالوحدة والمنتج');
+        }
+
+        return $productUnit;
+    }
+
+    private function reconcileInvoiceInventory(
+        $currentItems,
+        array $requestedItems,
+        int $currentWarehouseId,
+        int $requestedWarehouseId
+    ): void {
+        $stockDeltas = [];
+        $warehouseDeltas = [];
+
+        foreach ($requestedItems as $item) {
+            $this->resolvePurchaseProductUnit(
+                (int) $item['product_id'],
+                isset($item['unit_id']) ? (int) $item['unit_id'] : null,
+                isset($item['color_id']) ? (int) $item['color_id'] : null
+            );
+        }
+
+        foreach ($currentItems as $item) {
+            $key = implode(':', [
+                $item->product_id,
+                $item->product_unit_id ?? '',
+                $item->color_id ?? '',
+            ]);
+
+            if (!isset($stockDeltas[$key])) {
+                $stockDeltas[$key] = [
+                    'product_id' => (int) $item->product_id,
+                    'unit_id' => $item->product_unit_id ? (int) $item->product_unit_id : null,
+                    'color_id' => $item->color_id ? (int) $item->color_id : null,
+                    'quantity' => 0,
+                ];
+            }
+            $stockDeltas[$key]['quantity'] -= (int) $item->quantity;
+
+            $warehouseKey = $item->product_id . ':' . $currentWarehouseId;
+            $warehouseDeltas[$warehouseKey] = ($warehouseDeltas[$warehouseKey] ?? 0) - (int) $item->quantity;
+        }
+
+        foreach ($requestedItems as $item) {
+            $unitId = $item['unit_id'] ?? null;
+            $colorId = $item['color_id'] ?? null;
+            $key = implode(':', [$item['product_id'], $unitId ?? '', $colorId ?? '']);
+
+            if (!isset($stockDeltas[$key])) {
+                $stockDeltas[$key] = [
+                    'product_id' => (int) $item['product_id'],
+                    'unit_id' => $unitId ? (int) $unitId : null,
+                    'color_id' => $colorId ? (int) $colorId : null,
+                    'quantity' => 0,
+                ];
+            }
+            $stockDeltas[$key]['quantity'] += (int) $item['quantity'];
+
+            $warehouseKey = $item['product_id'] . ':' . $requestedWarehouseId;
+            $warehouseDeltas[$warehouseKey] = ($warehouseDeltas[$warehouseKey] ?? 0) + (int) $item['quantity'];
+        }
+
+        foreach ($stockDeltas as $delta) {
+            if ($delta['quantity'] === 0) {
+                continue;
+            }
+
+            $product = Product::whereKey($delta['product_id'])->lockForUpdate()->firstOrFail();
+
+            if ($delta['color_id'] !== null) {
+                $productUnit = DB::table('product_units')
+                    ->where('product_id', $product->id)
+                    ->where('unit_id', $delta['unit_id'])
+                    ->first();
+
+                if (!$productUnit) {
+                    throw new \RuntimeException('A matching product unit is required for items with color variants');
+                }
+
+                $colorStock = DB::table('product_unit_colors')
+                    ->where('product_unit_id', $productUnit->id)
+                    ->where('color_id', $delta['color_id'])
+                    ->whereNull('deleted_at')
+                    ->lockForUpdate()
+                    ->orderBy('id')
+                    ->first();
+
+                if (!$colorStock && $delta['quantity'] < 0) {
+                    throw new \RuntimeException('The existing color stock record for this purchase item was not found');
+                }
+
+                if ($delta['quantity'] < 0 && (int) $colorStock->stock < abs($delta['quantity'])) {
+                    throw new \RuntimeException('لا يمكن تقليل كمية الفاتورة لأن جزءاً من رصيد هذا اللون تم بيعه أو استخدامه');
+                }
+
+                if ($colorStock) {
+                    $query = DB::table('product_unit_colors')->where('id', $colorStock->id);
+                    if ($delta['quantity'] > 0) {
+                        $query->increment('stock', $delta['quantity']);
+                    } else {
+                        $query->decrement('stock', abs($delta['quantity']));
+                    }
+                } else {
+                    $now = now();
+                    DB::table('product_unit_colors')->insert([
+                        'product_unit_id' => $productUnit->id,
+                        'color_id' => $delta['color_id'],
+                        'stock' => $delta['quantity'],
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ]);
+                }
+
+                $variantTotal = DB::table('product_unit_colors as puc')
+                    ->join('product_units as pu', 'pu.id', '=', 'puc.product_unit_id')
+                    ->where('pu.product_id', $product->id)
+                    ->whereNull('puc.deleted_at')
+                    ->sum('puc.stock');
+                $product->update(['stock' => $variantTotal]);
+            } else {
+                if ($delta['quantity'] > 0) {
+                    $product->increment('stock', $delta['quantity']);
+                } else {
+                    if ((int) $product->stock < abs($delta['quantity'])) {
+                        throw new \RuntimeException('لا يمكن تقليل كمية الفاتورة لأن جزءاً من رصيد المنتج تم بيعه أو استخدامه');
+                    }
+                    $product->decrement('stock', abs($delta['quantity']));
+                }
+            }
+        }
+
+        foreach ($warehouseDeltas as $key => $quantity) {
+            if ($quantity === 0) {
+                continue;
+            }
+
+            [$productId, $warehouseId] = array_map('intval', explode(':', $key));
+            $warehouseStock = DB::table('product_warehouse')
+                ->where('product_id', $productId)
+                ->where('warehouse_id', $warehouseId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($warehouseStock) {
+                if ($quantity < 0 && (int) $warehouseStock->stock < abs($quantity)) {
+                    throw new \RuntimeException('لا يمكن تقليل كمية الفاتورة لأن رصيد المستودع تم استخدامه');
+                }
+
+                $query = DB::table('product_warehouse')
+                    ->where('product_id', $productId)
+                    ->where('warehouse_id', $warehouseId);
+                if ($quantity > 0) {
+                    $query->increment('stock', $quantity);
+                } else {
+                    $query->decrement('stock', abs($quantity));
+                }
+            } elseif ($quantity > 0) {
+                $now = now();
+                DB::table('product_warehouse')->insert([
+                    'product_id' => $productId,
+                    'warehouse_id' => $warehouseId,
+                    'stock' => $quantity,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+            } else {
+                throw new \RuntimeException('The existing warehouse stock record for this purchase item was not found');
+            }
+        }
     }
 
     public function store(PurchaseInvoiceRequest $request)
@@ -143,17 +391,11 @@ class PurchaseInvoiceController extends Controller
                 =============================
                 */
     
-                $productUnit = null;
-                if (!empty($item['unit_id'])) {
-                    $productUnit = DB::table('product_units')
-                        ->where('product_id', $item['product_id'])
-                        ->where('unit_id', $item['unit_id'])
-                        ->first();
-                }
-
-                if (!empty($item['color_id']) && !$productUnit) {
-                    throw new \Exception('A matching product unit is required for items with color variants');
-                }
+                $productUnit = $this->resolvePurchaseProductUnit(
+                    (int) $item['product_id'],
+                    isset($item['unit_id']) ? (int) $item['unit_id'] : null,
+                    isset($item['color_id']) ? (int) $item['color_id'] : null
+                );
     
                 if (!empty($item['color_id'])) {
                     $colorStock = DB::table('product_unit_colors')
@@ -211,10 +453,13 @@ class PurchaseInvoiceController extends Controller
                     ->increment('stock', $item['quantity']);
     
                 if (!$updated) {
+                    $now = now();
                     DB::table('product_warehouse')->insert([
                         'product_id' => $item['product_id'],
                         'warehouse_id' => $request->warehouse_id,
                         'stock' => $item['quantity'],
+                        'created_at' => $now,
+                        'updated_at' => $now,
                     ]);
                 }
             }        
@@ -224,29 +469,18 @@ class PurchaseInvoiceController extends Controller
             ✅ الخزنة
             =============================
             */
-            if (
-                $request->payment_method === 'cash' &&
-                $request->paid_amount > 0 &&
-                $request->treasury_id
-            ) {
-    
-                $treasury = Treasury::lockForUpdate()->find($request->treasury_id);
-    
-                if (!$treasury || $treasury->balance < $request->paid_amount) {
-                    throw new \Exception('رصيد الخزنة غير كافي');
-                }
-    
-                $treasury->decrement('balance', $request->paid_amount);
-    
-                Transfer::create([
-                    'type' => 'treasury_withdraw',
-                    'treasury_id' => $request->treasury_id,
-                    'purchase_invoice_id' => $invoice->id,
-                    'amount' => $request->paid_amount,
-                    'notes' => "دفعة لفاتورة مشتريات رقم {$invoice->invoice_number}",
-                ]);
+            if ((float) $request->paid_amount > 0) {
+                $this->recordInvoicePayment(
+                    $invoice,
+                    (int) $request->treasury_id,
+                    (int) $request->currency_id,
+                    (float) $request->paid_amount,
+                    "دفعة لفاتورة مشتريات رقم {$invoice->invoice_number}"
+                );
             }
-    
+
+            $invoice->syncPaidExpense();
+
             DB::commit();
 
             $invoice->loadSum('purchaseReturns', 'total_amount');
@@ -271,6 +505,9 @@ class PurchaseInvoiceController extends Controller
                 'status' => 200,
             ]);
     
+        } catch (ValidationException $e) {
+            DB::rollBack();
+            throw $e;
         } catch (\Exception $e) {
     
             DB::rollBack();
@@ -520,7 +757,6 @@ class PurchaseInvoiceController extends Controller
                     'treasury_id' => $treasury->id,
                     'payment_method' => 'cash',
                 ]);
-
                 $description = "دفعة نقدية لفاتورة مشتريات رقم {$lockedInvoice->invoice_number}";
                 if (!empty($data['reference_number'])) {
                     $description .= " - مرجع: {$data['reference_number']}";
@@ -529,6 +765,8 @@ class PurchaseInvoiceController extends Controller
                     $description .= " - {$data['notes']}";
                 }
 
+                $lockedInvoice->syncPaidExpense();
+
                 TreasuryTransaction::create([
                     'treasury_id' => $treasury->id,
                     'reference_type' => PurchaseInvoice::class,
@@ -536,6 +774,17 @@ class PurchaseInvoiceController extends Controller
                     'type' => 'out',
                     'amount' => $amount,
                     'description' => $description,
+                    'created_at' => $data['payment_date'] ?? now(),
+                ]);
+
+                Transfer::create([
+                    'type' => 'treasury_withdraw',
+                    'from_treasury_id' => $treasury->id,
+                    'purchase_invoice_id' => $lockedInvoice->id,
+                    'amount' => $amount,
+                    'currency' => $currencyCode,
+                    'notes' => $description,
+                    'created_by' => auth()->id(),
                     'created_at' => $data['payment_date'] ?? now(),
                 ]);
 
@@ -575,6 +824,7 @@ class PurchaseInvoiceController extends Controller
             $oldPaidAmount = $invoice->paid_amount;
             $oldTreasuryId = $invoice->treasury_id;
             $oldPaymentMethod = $invoice->payment_method;
+            $oldCurrencyId = $invoice->currency_id;
 
             $defaultTaxRate = $request->tax_id
                 ? $this->parseTaxRate(Tax::findOrFail($request->tax_id)->rate)
@@ -590,21 +840,20 @@ class PurchaseInvoiceController extends Controller
                 throw new \Exception('المبلغ المدفوع أكبر من إجمالي الفاتورة');
             }
 
-            // 1️⃣ **عكس حركات المخزون القديمة**
-            foreach ($invoice->items as $oldItem) {
-                $product = Product::find($oldItem->product_id);
-                if ($product) {
-                    $product->decrement('stock', $oldItem->quantity);
-                }
+            $existingItems = $invoice->items
+                ->groupBy(fn ($item) => implode(':', [
+                    $item->product_id,
+                    $item->product_unit_id ?? '',
+                    $item->color_id ?? '',
+                ]))
+                ->map(fn ($items) => $items->values());
 
-                DB::table('product_warehouse')
-                    ->where('product_id', $oldItem->product_id)
-                    ->where('warehouse_id', $invoice->warehouse_id)
-                    ->decrement('stock', $oldItem->quantity);
-            }
-
-            // 2️⃣ **حذف الأصناف القديمة**
-            PurchaseInvoiceItem::where('purchase_invoice_id', $invoice->id)->delete();
+            $this->reconcileInvoiceInventory(
+                $invoice->items,
+                $request->items,
+                (int) $invoice->warehouse_id,
+                (int) $request->warehouse_id
+            );
 
             // 3️⃣ **تحديث الفاتورة**
             $invoice->update([
@@ -628,7 +877,13 @@ class PurchaseInvoiceController extends Controller
 
             // 4️⃣ **إضافة الأصناف الجديدة**
             foreach ($request->items as $index => $item) {
-                PurchaseInvoiceItem::create([
+                $itemKey = implode(':', [
+                    $item['product_id'],
+                    $item['unit_id'] ?? '',
+                    $item['color_id'] ?? '',
+                ]);
+                $existingItem = $existingItems->get($itemKey)?->shift();
+                $itemData = [
                     'purchase_invoice_id' => $invoice->id,
                     'product_id' => $item['product_id'],
                     // ❌ شيل product_variant_id
@@ -640,60 +895,68 @@ class PurchaseInvoiceController extends Controller
                     'discount' => $item['discount'] ?? 0,
                     'tax' => $totals['items'][$index]['tax_rate'],
                     'total' => $totals['items'][$index]['total'],
-                ]);
+                ];
 
-                $product = Product::find($item['product_id']);
-                if ($product) {
-                    $product->increment('stock', $item['quantity']);
+                if ($existingItem) {
+                    $existingItem->update($itemData);
+                } else {
+                    PurchaseInvoiceItem::create($itemData);
                 }
 
-                $pivot = DB::table('product_warehouse')
-                    ->where('product_id', $item['product_id'])
-                    ->where('warehouse_id', $request->warehouse_id)
-                    ->first();
+            }
 
-                if ($pivot) {
-                    DB::table('product_warehouse')
-                        ->where('product_id', $item['product_id'])
-                        ->where('warehouse_id', $request->warehouse_id)
-                        ->increment('stock', $item['quantity']);
-                } else {
-                    DB::table('product_warehouse')->insert([
-                        'product_id' => $item['product_id'],
-                        'warehouse_id' => $request->warehouse_id,
-                        'stock' => $item['quantity'],
-                    ]);
+            foreach ($existingItems as $unusedItems) {
+                foreach ($unusedItems as $unusedItem) {
+                    $unusedItem->delete();
                 }
             }
 
             // 5️⃣ **معالجة الخزينة**
-            TreasuryTransaction::where('reference_type', PurchaseInvoice::class)
+            $previousTransactions = TreasuryTransaction::where('reference_type', PurchaseInvoice::class)
                 ->where('reference_id', $invoice->id)
-                ->delete();
+                ->get();
 
-            if ($oldPaymentMethod === 'cash' && $oldPaidAmount > 0 && $oldTreasuryId) {
+            if ($previousTransactions->isNotEmpty()) {
+                $oldCurrency = $oldCurrencyId
+                    ? Currency::find($oldCurrencyId)
+                    : null;
+
+                foreach ($previousTransactions as $transaction) {
+                    $oldTreasury = Treasury::whereKey($transaction->treasury_id)->lockForUpdate()->first();
+                    if ($oldTreasury && $oldCurrency) {
+                        $oldTreasury->updateBalance(
+                            $oldCurrencyId,
+                            (float) $transaction->amount,
+                            $oldCurrency->code
+                        );
+                    } elseif ($oldTreasury) {
+                        $oldTreasury->increment('balance', $transaction->amount);
+                    }
+                }
+            } elseif ($oldPaymentMethod === 'cash' && $oldPaidAmount > 0 && $oldTreasuryId) {
+                // Restore balances deducted by older invoice saves that did not create treasury transactions.
                 $oldTreasury = Treasury::find($oldTreasuryId);
                 if ($oldTreasury) {
                     $oldTreasury->increment('balance', $oldPaidAmount);
                 }
             }
 
-            if ($request->payment_method === 'cash' && $request->paid_amount > 0 && $request->treasury_id) {
-                TreasuryTransaction::create([
-                    'treasury_id' => $request->treasury_id,
-                    'reference_type' => PurchaseInvoice::class,
-                    'reference_id' => $invoice->id,
-                    'type' => 'out',
-                    'amount' => $request->paid_amount,
-                    'description' => "تحديث فاتورة مشتريات رقم {$invoice->invoice_number}",
-                    'created_at' => now(),
-                ]);
+            TreasuryTransaction::where('reference_type', PurchaseInvoice::class)
+                ->where('reference_id', $invoice->id)
+                ->delete();
+            Transfer::where('purchase_invoice_id', $invoice->id)->delete();
 
-                $treasury = Treasury::find($request->treasury_id);
-                if ($treasury) {
-                    $treasury->decrement('balance', $request->paid_amount);
-                }
+            if ((float) $request->paid_amount > 0) {
+                $this->recordInvoicePayment(
+                    $invoice,
+                    (int) $request->treasury_id,
+                    (int) $request->currency_id,
+                    (float) $request->paid_amount,
+                    "تحديث فاتورة مشتريات رقم {$invoice->invoice_number}"
+                );
             }
+
+            $invoice->syncPaidExpense();
 
             DB::commit();
 
@@ -708,6 +971,7 @@ class PurchaseInvoiceController extends Controller
                         'currency',
                         'tax',
                         'treasury',
+                        'treasuryTransactions.treasury',
                         'items.product',
                         'items.unit',
                         'items.color'
@@ -718,6 +982,9 @@ class PurchaseInvoiceController extends Controller
                 'status' => 200,
             ]);
 
+        } catch (ValidationException $e) {
+            DB::rollBack();
+            throw $e;
         } catch (\Exception $e) {
             DB::rollBack();
 

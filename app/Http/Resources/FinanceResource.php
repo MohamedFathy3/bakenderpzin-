@@ -10,6 +10,7 @@ class FinanceResource extends JsonResource
     {
         return [
             'id' => $this->id,
+            'purchase_invoice_id' => $this->purchase_invoice_id,
             'category' => $this->category,
             'amount' => $this->amount,
             'formatted_amount' => $this->formatted_amount,

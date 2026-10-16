@@ -32,6 +32,7 @@ class ProductResource extends JsonResource
             'price'         => $this->price,
             'cost'          => $this->cost,
             'active'        => $this->active,
+            'has_variants'  => (bool) $this->has_variants || $this->units->isNotEmpty(),
 
             'units' => ProductUnitResource::collection(
                 $this->units

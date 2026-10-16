@@ -60,6 +60,12 @@ class Finance extends Model
     {
         return $this->belongsTo(Branch::class);
     }
+
+    public function purchaseInvoice(): BelongsTo
+    {
+        return $this->belongsTo(PurchaseInvoice::class);
+    }
+
     public function getPaymentMethodArabicAttribute()
     {
         $methods = [

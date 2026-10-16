@@ -13,6 +13,7 @@ class Transfer extends Model
         'type',
         'from_treasury_id',
         'to_treasury_id',
+        'purchase_invoice_id',
         'from_bank_id',
         'to_bank_id',
         'amount',

@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class PurchaseInvoiceRequest extends FormRequest
 {
@@ -16,10 +17,18 @@ class PurchaseInvoiceRequest extends FormRequest
         return [
             'supplier_id' => 'required|exists:suppliers,id',
             'branch_id' => 'nullable|exists:branches,id',
-            'warehouse_id' => 'nullable|exists:warehouses,id',
-            'currency_id' => 'nullable|exists:currencies,id',
+            'warehouse_id' => 'required|exists:warehouses,id',
+            'currency_id' => [
+                Rule::requiredIf((float) $this->input('paid_amount', 0) > 0),
+                'nullable',
+                'exists:currencies,id',
+            ],
             'tax_id' => 'nullable|exists:taxes,id',
-            'treasury_id' => 'nullable|exists:treasuries,id',
+            'treasury_id' => [
+                Rule::requiredIf((float) $this->input('paid_amount', 0) > 0),
+                'nullable',
+                'exists:treasuries,id',
+            ],
 
             'invoice_date' => [
                 'required',
