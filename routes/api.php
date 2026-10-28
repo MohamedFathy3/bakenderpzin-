@@ -456,6 +456,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('shifts/{shift}', [CashierShiftController::class, 'show']);
     Route::post('shifts/open', [CashierShiftController::class, 'openShift']);
     Route::post('shifts/close', [CashierShiftController::class, 'closeShift']);
+    Route::post('shifts/expenses', [CashierShiftController::class, 'storeExpense']);
 });
 
 //////////////////////////////////////// shifts ////////////////////////////////

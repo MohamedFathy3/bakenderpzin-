@@ -30,6 +30,11 @@ class TreasuryTransaction extends BaseModel
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    public function createdByEmployee()
+    {
+        return $this->belongsTo(Employee::class, 'created_by_employee_id');
+    }
+
     // سكوب للحركات الواردة
     public function scopeIncoming($query)
     {

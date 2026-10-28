@@ -392,7 +392,8 @@ public function store(Request $request)
                     'type' => 'in',
                     'amount' => $cashPaid,
                     'description' => "فاتورة مبيعات رقم {$invoice->invoice_number}",
-                    'created_by' => $user?->id,
+                    'created_by' => $user instanceof Employee ? null : $user?->id,
+                    'created_by_employee_id' => $user instanceof Employee ? $user->id : null,
                 ]);
             }
         }

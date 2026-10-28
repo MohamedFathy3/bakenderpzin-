@@ -6,8 +6,11 @@ use App\Http\Resources\CashierShiftResource;
 use App\Models\Admin;
 use App\Models\CashierShift;
 use App\Models\Employee;
+use App\Models\Treasury;
+use App\Models\TreasuryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class CashierShiftController extends Controller
 {
@@ -64,7 +67,7 @@ class CashierShiftController extends Controller
   public function closeShift(Request $request)
     {
         $request->validate([
-            'actual_amount' => 'required|numeric|min:0',
+            'actual_amount' => 'required|numeric',
             'notes'         => 'nullable|string',
         ]);
 
@@ -83,6 +86,7 @@ class CashierShiftController extends Controller
                     }
                 })
                 ->latest('opened_at')
+                ->lockForUpdate()
                 ->first();
 
             if (!$shift) {
@@ -92,7 +96,14 @@ class CashierShiftController extends Controller
                 ], 404);
             }
 
-            $expected = ($shift->cash_sales + $shift->card_sales + $shift->wallet_sales - $shift->returns_amount);
+            $expected = (
+                $shift->opening_balance
+                + $shift->cash_sales
+                + $shift->card_sales
+                + $shift->wallet_sales
+                - $shift->returns_amount
+                - $shift->expenses_amount
+            );
 
             $shift->update([
                 'closing_balance' => $request->actual_amount,
@@ -121,6 +132,85 @@ class CashierShiftController extends Controller
                 'error'   => $e->getMessage(),
             ], 500);
         }
+    }
+
+    public function storeExpense(Request $request)
+    {
+        $validated = $request->validate([
+            'amount' => 'required|numeric|gt:0|decimal:0,2',
+            'description' => 'required|string|max:255',
+        ]);
+
+        $shift = DB::transaction(function () use ($request, $validated) {
+            $user = $request->user();
+            if (!$user instanceof Admin && !$user instanceof Employee) {
+                throw ValidationException::withMessages([
+                    'user' => 'لا يمكن تحديد مستخدم الوردية الحالي.',
+                ]);
+            }
+
+            $shiftQuery = CashierShift::where('status', 'open')
+                ->where(function ($query) use ($user) {
+                    if ($user instanceof Admin) {
+                        $query->where('admin_id', $user->id);
+                    } elseif ($user instanceof Employee) {
+                        $query->where('employee_id', $user->id);
+                    }
+                });
+
+            $shift = $shiftQuery->latest('opened_at')->lockForUpdate()->first();
+            if (!$shift) {
+                throw ValidationException::withMessages([
+                    'shift' => 'لا توجد وردية مفتوحة لك لتسجيل المصروف.',
+                ]);
+            }
+
+            $employee = $user instanceof Employee
+                ? $user
+                : $shift->employee()->first();
+            if (!$employee || !$employee->treasury_id) {
+                throw ValidationException::withMessages([
+                    'treasury' => 'لا توجد خزينة مرتبطة بموظف الوردية.',
+                ]);
+            }
+
+            $treasury = Treasury::whereKey($employee->treasury_id)
+                ->lockForUpdate()
+                ->first();
+            if (!$treasury) {
+                throw ValidationException::withMessages([
+                    'treasury' => 'تعذر العثور على خزينة موظف الوردية.',
+                ]);
+            }
+
+            $amount = (float) $validated['amount'];
+            if ((float) $treasury->balance < $amount) {
+                throw ValidationException::withMessages([
+                    'amount' => 'رصيد الخزينة غير كافٍ لتسجيل هذا المصروف.',
+                ]);
+            }
+
+            $treasury->decrement('balance', $amount);
+            $shift->increment('expenses_amount', $amount);
+
+            TreasuryTransaction::create([
+                'treasury_id' => $treasury->id,
+                'reference_type' => CashierShift::class,
+                'reference_id' => $shift->id,
+                'type' => 'out',
+                'amount' => $amount,
+                'description' => "مصروف وردية #{$shift->id}: {$validated['description']}",
+                'created_by_employee_id' => $employee->id,
+            ]);
+
+            return $shift->fresh();
+        });
+
+        return response()->json([
+            'status' => true,
+            'message' => 'تم تسجيل المصروف وخصمه من الخزينة والوردية.',
+            'data' => new CashierShiftResource($shift),
+        ]);
     }
 
     // عرض كل الورديات

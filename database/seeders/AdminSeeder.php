@@ -23,7 +23,6 @@ class AdminSeeder extends Seeder
                     'password' => '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', // password
                     'super_admin' => true,
                     'created_at' => now(),
-                    'email_verified_at' => now(),
                     'updated_at' => now(),
                 ],
                 [
@@ -32,7 +31,6 @@ class AdminSeeder extends Seeder
                     'password' => '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', // password
                     'super_admin' => true,
                     'created_at' => now(),
-                    'email_verified_at' => now(),
                     'updated_at' => now(),
                 ],
                 [
@@ -41,7 +39,6 @@ class AdminSeeder extends Seeder
                     'password' => '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', // password
                     'super_admin' => false,
                     'created_at' => now(),
-                    'email_verified_at' => now(),
                     'updated_at' => now(),
                 ],
                 [
@@ -50,7 +47,6 @@ class AdminSeeder extends Seeder
                     'password' => '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', // password
                     'super_admin' => false,
                     'created_at' => now(),
-                    'email_verified_at' => now(),
                     'updated_at' => now(),
                 ],
                 [
@@ -59,7 +55,6 @@ class AdminSeeder extends Seeder
                     'password' => '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', // password
                     'super_admin' => false,
                     'created_at' => now(),
-                    'email_verified_at' => now(),
                     'updated_at' => now(),
                 ],
             ]

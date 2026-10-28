@@ -9,28 +9,14 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('purchase_order_items', function (Blueprint $table) {
-            // ✅ إضافة الأعمدة الناقصة (من غير foreign keys)
-            if (!Schema::hasColumn('purchase_order_items', 'color_id')) {
-                $table->unsignedBigInteger('color_id')->nullable()->after('product_id');
-            }
-            
-            // if (!Schema::hasColumn('purchase_order_items', 'size_id')) {
-            //     $table->unsignedBigInteger('size_id')->nullable()->after('color_id');
-            // }
-            
-            if (!Schema::hasColumn('purchase_order_items', 'product_variant_id')) {
-                $table->unsignedBigInteger('product_variant_id')->nullable()->after('size_id');
-            }
-            
-            // ✅ إضافة indices (من غير foreign keys)
-            if (!Schema::hasColumn('purchase_order_items', 'color_id')) {
-                $table->index('color_id');
-            }
-            if (!Schema::hasColumn('purchase_order_items', 'size_id')) {
-                $table->index('size_id');
-            }
-            if (!Schema::hasColumn('purchase_order_items', 'product_variant_id')) {
-                $table->index('product_variant_id');
+            foreach (['color_id', 'size_id', 'product_variant_id'] as $column) {
+                if (!Schema::hasColumn('purchase_order_items', $column)) {
+                    $table->unsignedBigInteger($column)->nullable()->after('product_id');
+                }
+
+                if (!Schema::hasIndex('purchase_order_items', [$column])) {
+                    $table->index($column);
+                }
             }
         });
     }
@@ -38,11 +24,13 @@ return new class extends Migration
     public function down(): void
     {
         Schema::table('purchase_order_items', function (Blueprint $table) {
-            $columns = ['color_id', 'product_variant_id'];
-            foreach ($columns as $column) {
-                if (Schema::hasColumn('purchase_order_items', $column)) {
-                    $table->dropColumn($column);
-                }
+            $columns = array_values(array_filter(
+                ['color_id', 'size_id', 'product_variant_id'],
+                fn (string $column) => Schema::hasColumn('purchase_order_items', $column)
+            ));
+
+            if ($columns !== []) {
+                $table->dropColumn($columns);
             }
         });
     }
