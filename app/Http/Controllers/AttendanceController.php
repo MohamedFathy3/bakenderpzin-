@@ -22,15 +22,35 @@ class AttendanceController extends BaseController
         $this->crudRepository = $pattern;
     }
 
-    public function index()
+    public function index(Request $request)
     {
         try {
-            $attendance = AttendanceResource::collection($this->crudRepository->all(
-                [],
-                [],
-                ['*']
-            ));
-            return $attendance->additional(JsonResponse::success());
+            $filters = $request->input('filters', []);
+            $branchId = $filters['branch_id'] ?? $request->input('branch_id');
+            if (!$branchId) {
+                $attendance = AttendanceResource::collection($this->crudRepository->all([], [], ['*']));
+                return $attendance->additional(JsonResponse::success());
+            }
+
+            $query = Attendance::with('employee')->whereHas('employee', function ($employeeQuery) use ($branchId) {
+                $employeeQuery->where('branch_id', $branchId);
+            });
+            foreach (['employee_id', 'date', 'status'] as $field) {
+                if (!empty($filters[$field])) $query->where($field, $filters[$field]);
+            }
+            if ($request->filled('date_from')) $query->whereDate('date', '>=', $request->input('date_from'));
+            if ($request->filled('date_to')) $query->whereDate('date', '<=', $request->input('date_to'));
+            if (!empty($filters['employee_name'])) {
+                $query->whereHas('employee', function ($employeeQuery) use ($filters) {
+                    $employeeQuery->where('name', 'like', '%' . $filters['employee_name'] . '%')
+                        ->orWhere('name_ar', 'like', '%' . $filters['employee_name'] . '%');
+                });
+            }
+            $query->orderBy($request->input('orderBy', 'id'), $request->input('orderByDirection', 'desc'));
+            $rows = $request->boolean('paginate', true)
+                ? $query->paginate((int) $request->input('perPage', 15))
+                : $query->get();
+            return AttendanceResource::collection($rows)->additional(JsonResponse::success());
         } catch (Exception $e) {
             return JsonResponse::respondError($e->getMessage());
         }

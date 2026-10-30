@@ -49,6 +49,9 @@ class InvoiceController extends Controller
             if (!empty($filters['customer_id'])) {
                 $query->where('customer_id', $filters['customer_id']);
             }
+            if (!empty($filters['branch_id'])) {
+                $query->where('branch_id', $filters['branch_id']);
+            }
 
             if (!empty($filters['status'])) {
                 $query->where('status', $filters['status']);

@@ -12,6 +12,7 @@ use App\Http\Controllers\ClearDataController;
 use App\Http\Controllers\ColorController;
 use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
+use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DeleveryManController;
 use App\Http\Controllers\EmployeeController;
 use App\Http\Controllers\FinanceController;
@@ -32,6 +33,7 @@ use App\Http\Controllers\SalesInvoiceController;
 use App\Http\Controllers\SalesInvoiceReturnController;
 use App\Http\Controllers\SalesRepresentativeController;
 use App\Http\Controllers\SuppliersController;
+use App\Http\Controllers\SystemAlertController;
 use App\Http\Controllers\TaxController;
 use App\Http\Controllers\TransferController;
 use App\Http\Controllers\TreasuryController;
@@ -140,6 +142,7 @@ Route::get('inventory-logs/{inventoryLog}', [InventoryLogController::class, 'sho
 Route::post('/inventory/index', [InventoryLogController::class, 'index']);
 Route::post('/warehouses/index-product', [InventoryLogController::class, 'indexProduct']);
 Route::middleware(['auth:sanctum'])->get('/inventory/warehouse-report', [WarehouseInventoryReportController::class, 'index']);
+Route::middleware(['auth:sanctum'])->get('/system/alerts', [SystemAlertController::class, 'index']);
 
 //////////////////////////////////////// color ////////////////////////////////
 
@@ -200,6 +203,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
 });
 
 Route::get('/reports/revenue', [ProductController::class, 'getRevenueReport']);
+Route::middleware(['auth:sanctum'])->get('/dashboard/overview', [DashboardController::class, 'index']);
 Route::post('/products/import', [ProductController::class, 'importProducts']);
 Route::post('/products/add-stock', [ProductController::class, 'addStock']);
 

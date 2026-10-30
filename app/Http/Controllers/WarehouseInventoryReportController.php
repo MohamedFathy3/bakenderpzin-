@@ -12,6 +12,7 @@ class WarehouseInventoryReportController extends Controller
     {
         $filters = $request->validate([
             'warehouse_id' => 'nullable|integer|exists:warehouses,id',
+            'branch_id' => 'nullable|integer|exists:branches,id',
             'movement_warehouse_id' => 'nullable|integer|exists:warehouses,id',
             'product_id' => 'nullable|integer|exists:products,id',
             'search' => 'nullable|string|max:100',
@@ -27,11 +28,11 @@ class WarehouseInventoryReportController extends Controller
         $page = $filters['page'] ?? 1;
         $movementPage = $filters['movement_page'] ?? 1;
 
-        $warehouses = DB::table('warehouses')
+        $warehouseQuery = DB::table('warehouses')
             ->select('id', 'name', 'branch_id')
-            ->whereNull('deleted_at')
-            ->orderBy('name')
-            ->get();
+            ->whereNull('deleted_at');
+        if (!empty($filters['branch_id'])) $warehouseQuery->where('branch_id', $filters['branch_id']);
+        $warehouses = $warehouseQuery->orderBy('name')->get();
 
         $warehouseTotals = DB::table('product_warehouse as pw')
             ->join('products as p', 'p.id', '=', 'pw.product_id')
@@ -40,7 +41,9 @@ class WarehouseInventoryReportController extends Controller
             ->selectRaw('COALESCE(SUM(pw.stock), 0) as total_stock')
             ->selectRaw('COALESCE(SUM(pw.stock * COALESCE(pw.cost, p.cost, 0)), 0) as stock_value')
             ->whereNull('p.deleted_at')
-            ->whereNull('w.deleted_at')
+            ->whereNull('w.deleted_at');
+        if (!empty($filters['branch_id'])) $warehouseTotals->where('w.branch_id', $filters['branch_id']);
+        $warehouseTotals = $warehouseTotals
             ->groupBy('pw.warehouse_id')
             ->get()
             ->keyBy('warehouse_id');
@@ -71,6 +74,7 @@ class WarehouseInventoryReportController extends Controller
             ->selectRaw('(pw.stock * COALESCE(pw.cost, p.cost, 0)) as stock_value')
             ->whereNull('p.deleted_at')
             ->whereNull('w.deleted_at');
+        if (!empty($filters['branch_id'])) $balanceQuery->where('w.branch_id', $filters['branch_id']);
 
         if (!empty($filters['warehouse_id'])) {
             $balanceQuery->where('pw.warehouse_id', $filters['warehouse_id']);
@@ -108,7 +112,8 @@ class WarehouseInventoryReportController extends Controller
 
         if ($selectedProduct) {
             $movementWarehouseId = $filters['movement_warehouse_id'] ?? $filters['warehouse_id'] ?? null;
-            $movementQueries = $this->movementQueries($selectedProduct, $movementWarehouseId);
+            $branchId = $filters['branch_id'] ?? null;
+            $movementQueries = $this->movementQueries($selectedProduct, $movementWarehouseId, $branchId);
             $movementUnion = array_shift($movementQueries);
             foreach ($movementQueries as $query) {
                 $movementUnion->unionAll($query);
@@ -138,7 +143,8 @@ class WarehouseInventoryReportController extends Controller
                 $selectedProduct,
                 $movementWarehouseId,
                 $filters['type'] ?? 'all',
-                $filters['date_from'] ?? null
+                $filters['date_from'] ?? null,
+                $branchId
             );
 
             $movements = $movementRows->map(function ($row) {
@@ -189,7 +195,7 @@ class WarehouseInventoryReportController extends Controller
         ]);
     }
 
-    private function movementQueries(int $productId, ?int $warehouseId): array
+    private function movementQueries(int $productId, ?int $warehouseId, ?int $branchId = null): array
     {
         $purchases = DB::table('purchase_invoice_items as item')
             ->join('purchase_invoices as invoice', 'invoice.id', '=', 'item.purchase_invoice_id')
@@ -291,6 +297,19 @@ class WarehouseInventoryReportController extends Controller
             ->selectRaw('ret.return_number as reference, ret.reason as note');
 
         $queries = [$purchases, $purchaseReturns, $sales, $salesReturns, $adjustments, $posSales, $posReturns];
+        if ($branchId) {
+            $purchases->where('invoice.branch_id', $branchId);
+            $purchaseReturns->where('invoice.branch_id', $branchId);
+            $sales->where('invoice.branch_id', $branchId);
+            $salesReturns->where('invoice.branch_id', $branchId);
+            $adjustments->whereExists(function ($query) use ($branchId) {
+                $query->select(DB::raw(1))->from('warehouses as branch_warehouse')
+                    ->whereColumn('branch_warehouse.id', 'log.warehouse_id')
+                    ->where('branch_warehouse.branch_id', $branchId);
+            });
+            $posSales->where('invoice.branch_id', $branchId);
+            $posReturns->where('invoice.branch_id', $branchId);
+        }
         if ($warehouseId) {
             foreach ($queries as $index => $query) {
                 if ($index >= 5) {
@@ -308,13 +327,13 @@ class WarehouseInventoryReportController extends Controller
         return $queries;
     }
 
-    private function openingMovements(int $productId, ?int $warehouseId, string $type, ?string $dateFrom)
+    private function openingMovements(int $productId, ?int $warehouseId, string $type, ?string $dateFrom, ?int $branchId = null)
     {
         if ($type !== 'all' && $type !== 'opening') {
             return collect();
         }
 
-        $movementQueries = $this->movementQueries($productId, null);
+        $movementQueries = $this->movementQueries($productId, null, $branchId);
         $netMovements = [];
         foreach ($movementQueries as $query) {
             if ($dateFrom) {
@@ -334,6 +353,7 @@ class WarehouseInventoryReportController extends Controller
             ->join('products as p', 'p.id', '=', 'pw.product_id')
             ->where('pw.product_id', $productId)
             ->whereNull('w.deleted_at')
+            ->when($branchId, fn ($query) => $query->where('w.branch_id', $branchId))
             ->select('pw.warehouse_id', 'w.name as warehouse_name', 'pw.product_id', 'p.name as product_name', 'pw.stock', 'pw.cost', 'p.cost as product_cost', 'pw.created_at');
         if ($warehouseId) {
             $currentStocks->where('pw.warehouse_id', $warehouseId);

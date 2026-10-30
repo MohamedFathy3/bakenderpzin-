@@ -23,15 +23,25 @@ class InventoryLogController extends BaseController
         $this->crudRepository = $pattern;
     }
 
-    public function index()
+    public function index(Request $request)
     {
         try {
-            $Inventory = InventoryLogResource::collection($this->crudRepository->all(
-                ['warehouse', 'product'],
-                [],
-                ['*']
-            ));
-            return $Inventory->additional(JsonResponse::success());
+            $branchId = $request->input('filters.branch_id', $request->input('branch_id'));
+            if (!$branchId) {
+                $Inventory = InventoryLogResource::collection($this->crudRepository->all(
+                    ['warehouse', 'product'], [], ['*']
+                ));
+                return $Inventory->additional(JsonResponse::success());
+            }
+
+            $query = InventoryLog::with(['warehouse', 'product'])->whereHas('warehouse', function ($warehouseQuery) use ($branchId) {
+                $warehouseQuery->where('branch_id', $branchId);
+            });
+            $query->orderBy($request->input('orderBy', 'id'), $request->input('orderByDirection', 'desc'));
+            $rows = $request->boolean('paginate', true)
+                ? $query->paginate((int) $request->input('perPage', 15))
+                : $query->get();
+            return InventoryLogResource::collection($rows)->additional(JsonResponse::success());
         } catch (Exception $e) {
             return JsonResponse::respondError($e->getMessage());
         }
@@ -102,7 +112,11 @@ public function indexProduct(Request $request)
 {
     try {
 
-        $query = ProductWarehouse::with('product');
+        $query = ProductWarehouse::with(['product', 'warehouse']);
+        if ($request->filled('filters.branch_id')) {
+            $branchId = $request->input('filters.branch_id');
+            $query->whereHas('warehouse', fn ($warehouseQuery) => $warehouseQuery->where('branch_id', $branchId));
+        }
 
         // البحث باسم المخزن
         if ($request->filled('filters.warehouse_name')) {

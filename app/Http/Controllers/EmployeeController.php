@@ -20,10 +20,13 @@ class EmployeeController extends BaseController
         $this->crudRepository = $pattern;
     }
 
-  public function index()
+  public function index(Request $request)
 {
     try {
-        $employees = Employee::with(['role', 'branch', 'treasury'])->get();
+        $query = Employee::with(['role', 'branch', 'treasury']);
+        $branchId = $request->input('filters.branch_id', $request->input('branch_id'));
+        if ($branchId) $query->where('branch_id', $branchId);
+        $employees = $query->get();
         $employee = EmployeeResource::collection($employees);
         return $employee->additional(JsonResponse::success());
     } catch (Exception $e) {
