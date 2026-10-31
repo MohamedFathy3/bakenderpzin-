@@ -576,3 +576,14 @@ Route::get('activity-logs', [ActivityLogController::class, 'index']);
 //////////////////////////////////////// clearAll ////////////////////////////////
 Route::delete('clear-all', [ActivityLogController::class, 'clearAll']);
 //////////////////////////////////////// clearAll ////////////////////////////////
+
+// Manufacturing module (additive; all endpoints require Sanctum authentication).
+Route::middleware(['auth:sanctum'])->prefix('manufacturing')->group(function () {
+    $c = \App\Http\Controllers\ManufacturingController::class;
+    Route::get('boms', [$c,'bomIndex']); Route::post('boms', [$c,'bomStore']); Route::get('boms/{bomVersion}', [$c,'bomShow']); Route::put('boms/{bomVersion}', [$c,'bomUpdate']); Route::delete('boms/{bomVersion}', [$c,'bomDestroy']);
+    Route::get('products', [$c,'productIndex']); Route::post('products', [$c,'productStore']); Route::put('products/{product}', [$c,'productUpdate']);
+    Route::get('equipment', [$c,'equipmentIndex']); Route::post('equipment', [$c,'equipmentStore']); Route::put('equipment/{equipment}', [$c,'equipmentUpdate']); Route::delete('equipment/{equipment}', [$c,'equipmentDestroy']);
+    Route::get('orders', [$c,'orderIndex']); Route::post('orders', [$c,'orderStore']); Route::get('orders/{manufacturingOrder}', [$c,'orderShow']);
+    Route::get('orders/{manufacturingOrder}/availability', [$c,'availability']); Route::post('orders/{manufacturingOrder}/reserve', [$c,'reserve']); Route::post('orders/{manufacturingOrder}/issue', [$c,'issue']); Route::post('orders/{manufacturingOrder}/return', [$c,'returnMaterial']); Route::post('orders/{manufacturingOrder}/scrap', [$c,'scrap']);
+    Route::post('orders/{manufacturingOrder}/operations/{operation}', [$c,'operation']); Route::post('orders/{manufacturingOrder}/quality', [$c,'quality']); Route::post('orders/{manufacturingOrder}/receive', [$c,'receive']); Route::post('orders/{manufacturingOrder}/cancel', [$c,'cancel']); Route::post('orders/{manufacturingOrder}/close', [$c,'close']);
+});

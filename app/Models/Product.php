@@ -19,6 +19,8 @@ class Product extends BaseModel
 
     protected $casts = [
         'active' => 'boolean',
+        'dimensions' => 'array',
+        'conversion_factor' => 'decimal:6',
     ];
 
     public function units()
@@ -43,6 +45,8 @@ class Product extends BaseModel
             ->withTimestamps();
     }
 
+    public function bomVersions() { return $this->hasMany(\App\Manufacturing\Models\BomVersion::class); }
+    public function manufacturingOrders() { return $this->hasMany(\App\Manufacturing\Models\ManufacturingOrder::class); }
     public function purchaseInvoiceItems()
     {
         return $this->hasMany(PurchaseInvoiceItem::class);
