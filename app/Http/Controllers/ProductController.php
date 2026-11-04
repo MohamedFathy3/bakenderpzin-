@@ -30,17 +30,52 @@ class ProductController extends BaseController
         $this->crudRepository = $pattern;
     }
 
-    public function index()
+    public function index(Request $request)
     {
         try {
-            $product = ProductResource::collection($this->crudRepository->all(
-                [],
-                [],
-                ['*']
-            ));
-            return $product->additional(JsonResponse::success());
+            $warehouseId = $request->query('warehouse_id');
+
+            $relations = [
+                'warehouses',
+                'units.colors.color',
+                'category',
+            ];
+
+            if ($warehouseId) {
+                // رصيد كل لون داخل المخزن المختار (نفس مصدر شاشة التحويل)
+                $relations['units.colors.warehouseStocks'] = fn ($q) => $q->where('warehouse_id', $warehouseId);
+            }
+
+            $products = $this->crudRepository->all($relations, [], ['*']);
+
+            if ($warehouseId) {
+                $this->applyWarehouseStock($products, (int) $warehouseId);
+            }
+
+            return ProductResource::collection($products)
+                ->additional(JsonResponse::success());
+
         } catch (Exception $e) {
             return JsonResponse::respondError($e->getMessage());
+        }
+    }
+
+    /**
+     * يستبدل stock الإجمالي للمنتج برصيده في المخزن المحدد (من product_warehouse)
+     * حتى تطابق شاشة المخزون شاشة التحويلات.
+     */
+    private function applyWarehouseStock($products, int $warehouseId): void
+    {
+        $products = $products instanceof Product ? collect([$products]) : collect($products);
+
+        $stocks = DB::table('product_warehouse')
+            ->where('warehouse_id', $warehouseId)
+            ->whereIn('product_id', $products->pluck('id'))
+            ->pluck('stock', 'product_id');
+
+        foreach ($products as $p) {
+            $p->setAttribute('total_stock_all_warehouses', (int) $p->stock);
+            $p->setAttribute('stock', (int) ($stocks[$p->id] ?? 0));
         }
     }
 
@@ -117,15 +152,40 @@ class ProductController extends BaseController
 
 
 
-    public function show(Product $product): ?\Illuminate\Http\JsonResponse
-    {
-        try {
-            return JsonResponse::respondSuccess('Item Fetched Successfully', new ProductResource($product));
-        } catch (Exception $e) {
-            return JsonResponse::respondError($e->getMessage());
-        }
-    }
+public function show(Request $request, Product $product)
+{
+    $warehouseId = $request->query('warehouse_id');
 
+    $product->load('warehouses', 'units.colors.color');
+
+    // ✅ احسب رصيد كل لون من المصدر الوحيد
+    $product->units->each(function ($unit) use ($warehouseId) {
+        $unit->colors->each(function ($color) use ($warehouseId) {
+            $query = DB::table('product_unit_color_warehouse')
+                ->where('product_unit_color_id', $color->id);
+
+            if ($warehouseId) {
+                $query->where('warehouse_id', $warehouseId);
+            }
+
+            // ✅ الرقم الحقيقي من المصدر الوحيد
+            $color->warehouse_stock = (int) $query->sum('stock');
+            $color->warehouseStocks = $warehouseId
+                ? $query->get(['warehouse_id', 'stock'])
+                : collect();
+        });
+    });
+
+    // ✅ رصيد المنتج = مجموع ألوانه (في المخزن المحدد أو كل المخازن)
+    $product->stock = $product->units->sum(function ($unit) {
+        return $unit->colors->sum('warehouse_stock');
+    });
+
+    return JsonResponse::respondSuccess(
+        'Item Fetched Successfully',
+        new ProductResource($product)
+    );
+}
 
 
 public function update(ProductUpdateRequest $request, Product $product)
@@ -183,7 +243,7 @@ public function update(ProductUpdateRequest $request, Product $product)
             $unitsToDelete = array_diff($existingUnitIds, $newUnitIds);
             if (!empty($unitsToDelete)) {
                 $product->units()->whereIn('unit_id', $unitsToDelete)->each(function ($unit) {
-                    $unit->colors()->delete();
+                    $this->deleteColorsWithStock($unit->colors()->pluck('id')->all());
                     $unit->delete();
                 });
             }
@@ -200,15 +260,20 @@ public function update(ProductUpdateRequest $request, Product $product)
                     ]
                 );
 
-                // حذف الألوان القديمة لهذه الوحدة
-                $productUnit->colors()->delete();
+                // مزامنة الألوان بدون حذفها وإعادة إنشائها (حتى لا تضيع أرصدة المخازن)
+                $incoming = collect($unitData['colors'] ?? [])->keyBy('color_id');
+                $existing = $productUnit->colors()->get()->keyBy('color_id');
 
-                // إضافة الألوان الجديدة
-                if (!empty($unitData['colors'])) {
-                    foreach ($unitData['colors'] as $colorData) {
+                // ألوان اتشالت من الفورم
+                $removedIds = $existing->diffKeys($incoming)->pluck('id')->all();
+                $this->deleteColorsWithStock($removedIds);
+
+                // ألوان جديدة فقط: تبدأ بصفر، والكمية تدخل بالشراء/addStock/الجرد
+                foreach ($incoming as $colorId => $colorData) {
+                    if (!$existing->has($colorId)) {
                         $productUnit->colors()->create([
-                            'color_id' => $colorData['color_id'],
-                            'stock'    => $colorData['stock'],
+                            'color_id' => $colorId,
+                            'stock'    => 0,
                         ]);
                     }
                 }
@@ -216,7 +281,7 @@ public function update(ProductUpdateRequest $request, Product $product)
         } else {
             // إذا ما فيش units، احذف كل الحجات القديمة
             $product->units()->each(function ($unit) {
-                $unit->colors()->delete();
+                $this->deleteColorsWithStock($unit->colors()->pluck('id')->all());
                 $unit->delete();
             });
         }
@@ -234,6 +299,15 @@ public function update(ProductUpdateRequest $request, Product $product)
     }
 }
 
+
+    private function deleteColorsWithStock(array $colorRecordIds): void
+    {
+        if (empty($colorRecordIds)) {
+            return;
+        }
+        DB::table('product_unit_color_warehouse')->whereIn('product_unit_color_id', $colorRecordIds)->delete();
+        ProductUnitColor::whereIn('id', $colorRecordIds)->delete();
+    }
 
     public function destroy(Request $request): ?\Illuminate\Http\JsonResponse
     {
@@ -509,7 +583,33 @@ public function update(ProductUpdateRequest $request, Product $product)
                     'color_id'        => $colorId,
                 ]);
 
-                $unitColor->increment('stock', $item['stock']);
+                // رصيد اللون داخل المخزن (المصدر اللي بتقرأ منه شاشة التحويل)
+                $row = DB::table('product_unit_color_warehouse')
+                    ->where('warehouse_id', $item['warehouse_id'])
+                    ->where('product_unit_color_id', $unitColor->id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($row) {
+                    DB::table('product_unit_color_warehouse')->where('id', $row->id)->update([
+                        'stock'      => DB::raw('stock + ' . (int) $item['stock']),
+                        'updated_at' => now(),
+                    ]);
+                } else {
+                    DB::table('product_unit_color_warehouse')->insert([
+                        'warehouse_id'          => $item['warehouse_id'],
+                        'product_unit_color_id' => $unitColor->id,
+                        'stock'                 => (int) $item['stock'],
+                        'created_at'            => now(),
+                        'updated_at'            => now(),
+                    ]);
+                }
+
+                // الإجمالي على اللون = مجموع المخازن
+                $unitColor->update([
+                    'stock' => DB::table('product_unit_color_warehouse')
+                        ->where('product_unit_color_id', $unitColor->id)->sum('stock'),
+                ]);
             }
         }
 
