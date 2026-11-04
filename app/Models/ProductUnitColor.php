@@ -23,6 +23,6 @@ class ProductUnitColor extends BaseModel
 
     public function warehouseStocks()
     {
-        return $this->hasMany(WarehouseProductUnitColor::class, 'product_unit_color_id');
+        return $this->hasMany(ProductUnitColorWarehouse::class, 'product_unit_color_id');
     }
 }
