@@ -8,6 +8,7 @@ use App\Models\Product;
 use App\Models\Currency;
 use App\Models\PurchaseInvoice;
 use App\Models\PurchaseInvoiceItem;
+use App\Models\ProductUnitColorWarehouse;
 use App\Models\Tax;
 use App\Models\Transfer;
 use App\Models\Treasury;
@@ -19,6 +20,40 @@ use Illuminate\Validation\ValidationException;
 
 class PurchaseInvoiceController extends Controller
 {
+
+    private function adjustWarehouseVariantStock(int $variantId, int $warehouseId, int $delta): void
+    {
+        $row = DB::table('product_unit_color_warehouse')
+            ->where('warehouse_id', $warehouseId)
+            ->where('product_unit_color_id', $variantId)
+            ->lockForUpdate()
+            ->first();
+
+        if ($row) {
+            if ($delta < 0 && (int) $row->stock < abs($delta)) {
+                throw new \RuntimeException('رصيد المتغير في المخزن غير كافٍ لتعديل الفاتورة');
+            }
+            DB::table('product_unit_color_warehouse')
+                ->where('id', $row->id)
+                ->update([
+                    'stock' => (int) $row->stock + $delta,
+                    'updated_at' => now(),
+                ]);
+            return;
+        }
+
+        if ($delta < 0) {
+            throw new \RuntimeException('رصيد المتغير غير موجود في المخزن لتعديل الفاتورة');
+        }
+
+        DB::table('product_unit_color_warehouse')->insert([
+            'warehouse_id' => $warehouseId,
+            'product_unit_color_id' => $variantId,
+            'stock' => $delta,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
 
     private function parseTaxRate($rate): float
     {
@@ -184,6 +219,25 @@ class PurchaseInvoiceController extends Controller
 
             $warehouseKey = $item->product_id . ':' . $currentWarehouseId;
             $warehouseDeltas[$warehouseKey] = ($warehouseDeltas[$warehouseKey] ?? 0) - (int) $item->quantity;
+
+            if ($item->color_id !== null && $item->product_unit_id !== null) {
+                $unit = DB::table('product_units')
+                    ->where('product_id', $item->product_id)
+                    ->where('unit_id', $item->product_unit_id)
+                    ->first();
+                $variant = $unit ? DB::table('product_unit_colors')
+                    ->where('product_unit_id', $unit->id)
+                    ->where('color_id', $item->color_id)
+                    ->whereNull('deleted_at')
+                    ->first() : null;
+                if ($variant) {
+                    $this->adjustWarehouseVariantStock(
+                        (int) $variant->id,
+                        $currentWarehouseId,
+                        -(int) $item->quantity
+                    );
+                }
+            }
         }
 
         foreach ($requestedItems as $item) {
@@ -203,6 +257,25 @@ class PurchaseInvoiceController extends Controller
 
             $warehouseKey = $item['product_id'] . ':' . $requestedWarehouseId;
             $warehouseDeltas[$warehouseKey] = ($warehouseDeltas[$warehouseKey] ?? 0) + (int) $item['quantity'];
+
+            if ($colorId !== null && $unitId !== null) {
+                $unit = DB::table('product_units')
+                    ->where('product_id', $item['product_id'])
+                    ->where('unit_id', $unitId)
+                    ->first();
+                $variant = $unit ? DB::table('product_unit_colors')
+                    ->where('product_unit_id', $unit->id)
+                    ->where('color_id', $colorId)
+                    ->whereNull('deleted_at')
+                    ->first() : null;
+                if ($variant) {
+                    $this->adjustWarehouseVariantStock(
+                        (int) $variant->id,
+                        $requestedWarehouseId,
+                        (int) $item['quantity']
+                    );
+                }
+            }
         }
 
         foreach ($stockDeltas as $delta) {
@@ -312,6 +385,12 @@ class PurchaseInvoiceController extends Controller
                 throw new \RuntimeException('The existing warehouse stock record for this purchase item was not found');
             }
         }
+
+        foreach (collect($requestedItems)->pluck('product_id')
+            ->merge(collect($currentItems)->pluck('product_id'))
+            ->unique() as $productId) {
+            ProductUnitColorWarehouse::syncProduct((int) $productId);
+        }
     }
 
     public function store(PurchaseInvoiceRequest $request)
@@ -417,7 +496,19 @@ class PurchaseInvoiceController extends Controller
                             'created_at' => now(),
                             'updated_at' => now(),
                         ]);
+                        $colorStock = DB::table('product_unit_colors')
+                            ->where('product_unit_id', $productUnit->id)
+                            ->where('color_id', $item['color_id'])
+                            ->whereNull('deleted_at')
+                            ->orderBy('id')
+                            ->first();
                     }
+
+                    $this->adjustWarehouseVariantStock(
+                        (int) $colorStock->id,
+                        (int) $request->warehouse_id,
+                        (int) $item['quantity']
+                    );
                 }
     
                 /*
@@ -463,6 +554,19 @@ class PurchaseInvoiceController extends Controller
                     ]);
                 }
             }        
+
+            // المصدر الموحد يعيد حساب product_unit_colors وproduct_warehouse
+            // حتى تتطابق شاشة المخزون والتحويلات بعد فاتورة الشراء.
+            foreach (collect($request->items)->pluck('product_id')->unique() as $productId) {
+                $hasVariants = DB::table('product_units as pu')
+                    ->join('product_unit_colors as puc', 'puc.product_unit_id', '=', 'pu.id')
+                    ->where('pu.product_id', $productId)
+                    ->whereNull('puc.deleted_at')
+                    ->exists();
+                if ($hasVariants) {
+                    ProductUnitColorWarehouse::syncProduct((int) $productId);
+                }
+            }
             
             /*
             =============================
