@@ -112,7 +112,10 @@ public function indexProduct(Request $request)
 {
     try {
 
-        $query = ProductWarehouse::with(['product', 'warehouse']);
+        $query = ProductWarehouse::with([
+            'product.units.colors.warehouseStocks',
+            'warehouse',
+        ]);
         if ($request->filled('filters.branch_id')) {
             $branchId = $request->input('filters.branch_id');
             $query->whereHas('warehouse', fn ($warehouseQuery) => $warehouseQuery->where('branch_id', $branchId));
@@ -128,7 +131,19 @@ public function indexProduct(Request $request)
             });
         }
 
-$items = $query->get()->map(function ($item) {
+$items = $query->get()->map(function ($item) use ($request) {
+
+    $productData = (new ProductResource($item->product))->resolve($request);
+    $productData['units'] = collect($productData['units'] ?? [])->map(function ($unit) use ($item) {
+        $unit['colors'] = collect($unit['colors'] ?? [])->map(function ($color) use ($item) {
+            $warehouseStock = collect($color['warehouseStocks'] ?? [])
+                ->firstWhere('warehouse_id', (int) $item->warehouse_id);
+            $color['warehouse_stock'] = (int) ($warehouseStock['stock'] ?? 0);
+            $color['stock'] = $color['warehouse_stock'];
+            return $color;
+        })->values()->all();
+        return $unit;
+    })->values()->all();
 
     return [
 
@@ -136,9 +151,7 @@ $items = $query->get()->map(function ($item) {
 
         'product_name' => $item->product?->name,
 
-        'product' => $item->product
-            ? new ProductResource($item->product)
-            : null,
+        'product' => $item->product ? $productData : null,
 
         'warehouse_name' => $item->warehouse?->name,
 

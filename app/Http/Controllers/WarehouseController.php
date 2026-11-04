@@ -224,55 +224,131 @@ foreach ($items as $item) {
         continue;
     }
 
-    if ($unitId <= 0 || $colorId <= 0) {
-        throw new \RuntimeException(
-            "بيانات المقاس واللون غير مكتملة للمنتج {$productId}"
-        );
-    }
+    public function transfer(Request $request)
+    {
+        $validated = $request->validate([
+            'from_warehouse_id' => 'required|integer|exists:warehouses,id',
+            'to_warehouse_id' => 'required|integer|different:from_warehouse_id|exists:warehouses,id',
+            'products' => 'required|array|min:1',
+            'products.*.product_id' => 'required|integer|exists:products,id',
+            'products.*.product_unit_id' => 'nullable|integer|exists:product_units,id',
+            'products.*.color_id' => 'nullable|integer|exists:colors,id',
+            'products.*.quantity' => 'required|integer|min:1',
+            'products.*.note' => 'nullable|string|max:1000',
+        ]);
 
-                $variantKey = "{$productId}-{$unitId}-{$colorId}";
+        try {
+            $result = DB::transaction(function () use ($validated) {
+                $fromWarehouse = Warehouse::whereKey($validated['from_warehouse_id'])->lockForUpdate()->firstOrFail();
+                $toWarehouse = Warehouse::whereKey($validated['to_warehouse_id'])->lockForUpdate()->firstOrFail();
+                $totals = collect($validated['products'])->groupBy('product_id')->map(fn ($items) => $items->sum('quantity'));
+                $sourceRows = [];
+                $variantMoves = [];
+                $totalValue = 0.0;
 
-                if (!isset($variantTotals[$variantKey])) {
-
-                    $variantTotals[$variantKey] = [
-                        'product_id' => $productId,
-                        'unit_id' => $unitId,
-                        'color_id' => $colorId,
-                        'quantity' => 0,
-                    ];
+                foreach ($totals as $productId => $quantity) {
+                    $sourceRows[$productId] = DB::table('product_warehouse')
+                        ->where('warehouse_id', $fromWarehouse->id)
+                        ->where('product_id', $productId)
+                        ->lockForUpdate()->first();
+                    if (!$sourceRows[$productId] || (int) $sourceRows[$productId]->stock < (int) $quantity) {
+                        throw new \RuntimeException('الكمية غير متاحة للتحويل في مخزن المصدر');
+                    }
+                    $product = DB::table('products')->where('id', $productId)->first();
+                    $unitCost = (float) ($sourceRows[$productId]->cost ?? $product->cost ?? 0);
+                    $totalValue += $unitCost * (int) $quantity;
                 }
 
                 $variantTotals[$variantKey]['quantity'] += $quantity;
             }
 
-            /*
-            |--------------------------------------------------------------------------
-            | 4. Lock and validate main product stock
-            |--------------------------------------------------------------------------
-            */
+                    if ($unitId === 0 && $colorId === 0) {
+                        continue;
+                    }
+                    if ($unitId === 0 || $colorId === 0) {
+                        throw new \RuntimeException('يجب اختيار المقاس واللون معًا للتحويل');
+                    }
 
-            $stockRows = [];
-            $totalValue = 0;
+                    $variant = DB::table('product_unit_colors as colors')
+                        ->join('product_units as units', 'units.id', '=', 'colors.product_unit_id')
+                        ->where('colors.product_unit_id', $unitId)
+                        ->where('colors.color_id', $colorId)
+                        ->where('units.product_id', $productId)
+                        ->whereNull('colors.deleted_at')
+                        ->whereNull('units.deleted_at')
+                        ->select('colors.id as variant_id', 'colors.stock')
+                        ->first();
+                    if (!$variant) {
+                        throw new \RuntimeException('المقاس واللون غير مرتبطين بهذا المنتج');
+                    }
 
-            foreach ($totals as $productId => $quantity) {
-
-                $source = DB::table('product_warehouse')
-                    ->where('warehouse_id', $fromWarehouseId)
-                    ->where('product_id', $productId)
-                    ->lockForUpdate()
-                    ->first();
-
-                if (!$source) {
-                    throw new \RuntimeException(
-                        "المنتج {$productId} غير موجود في المخزن المصدر."
-                    );
+                    $sourceVariant = DB::table('warehouse_product_unit_colors')
+                        ->where('warehouse_id', $fromWarehouse->id)
+                        ->where('product_unit_color_id', $variant->variant_id)
+                        ->lockForUpdate()->first();
+                    if (!$sourceVariant || (int) $sourceVariant->stock < $quantity) {
+                        throw new \RuntimeException('كمية المقاس واللون غير متاحة في مخزن المصدر');
+                    }
+                    $variantMoves[] = [
+                        'variant_id' => (int) $variant->variant_id,
+                        'product_id' => $productId,
+                        'quantity' => $quantity,
+                    ];
                 }
 
-                if ((float) $source->stock < $quantity) {
-                    throw new \RuntimeException(
-                        "المخزون غير كافٍ للمنتج {$productId}. " .
-                        "المتاح: {$source->stock}، المطلوب: {$quantity}"
-                    );
+                foreach ($variantMoves as $move) {
+                    $sourceVariant = DB::table('warehouse_product_unit_colors')
+                        ->where('warehouse_id', $fromWarehouse->id)
+                        ->where('product_unit_color_id', $move['variant_id'])
+                        ->lockForUpdate()->first();
+                    DB::table('warehouse_product_unit_colors')->whereKey($sourceVariant->id)->decrement('stock', $move['quantity']);
+
+                    $destinationVariant = DB::table('warehouse_product_unit_colors')
+                        ->where('warehouse_id', $toWarehouse->id)
+                        ->where('product_unit_color_id', $move['variant_id'])
+                        ->lockForUpdate()->first();
+                    if ($destinationVariant) {
+                        DB::table('warehouse_product_unit_colors')->whereKey($destinationVariant->id)->increment('stock', $move['quantity']);
+                    } else {
+                        DB::table('warehouse_product_unit_colors')->insert([
+                            'warehouse_id' => $toWarehouse->id,
+                            'product_unit_color_id' => $move['variant_id'],
+                            'stock' => $move['quantity'],
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    }
+
+                    DB::table('product_unit_colors')->where('id', $move['variant_id'])->update([
+                        'stock' => DB::raw('(SELECT COALESCE(SUM(stock), 0) FROM warehouse_product_unit_colors WHERE product_unit_color_id = ' . (int) $move['variant_id'] . ')'),
+                        'updated_at' => now(),
+                    ]);
+                }
+
+                foreach ($totals as $productId => $quantity) {
+                    DB::table('product_warehouse')->whereKey($sourceRows[$productId]->id)->decrement('stock', $quantity);
+                    $destinationStock = DB::table('product_warehouse')
+                        ->where('warehouse_id', $toWarehouse->id)->where('product_id', $productId)
+                        ->lockForUpdate()->first();
+                    if ($destinationStock) {
+                        DB::table('product_warehouse')->whereKey($destinationStock->id)->increment('stock', $quantity);
+                        if ($destinationStock->cost === null && $sourceRows[$productId]->cost !== null) {
+                            DB::table('product_warehouse')->whereKey($destinationStock->id)->update(['cost' => $sourceRows[$productId]->cost]);
+                        }
+                    } else {
+                        DB::table('product_warehouse')->insert([
+                            'warehouse_id' => $toWarehouse->id,
+                            'product_id' => $productId,
+                            'stock' => $quantity,
+                            'cost' => $sourceRows[$productId]->cost,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    }
+                    DB::table('products')->whereKey($productId)->update([
+                        'stock' => DB::raw('(SELECT COALESCE(SUM(stock), 0) FROM product_warehouse WHERE product_id = ' . (int) $productId . ')'),
+                        'updated_at' => now(),
+                    ]);
                 }
 
                 $stockRows[$productId] = $source;
@@ -576,14 +652,66 @@ foreach ($affectedProductIds as $pid) {
                     'created_by' => auth()->id(),
                 ]);
 
-                \App\Models\TreasuryTransaction::create([
-                    'treasury_id' => $destinationTreasury->id,
-                    'type' => 'out',
-                    'amount' => $totalValue,
-                    'reference_type' => \App\Models\WarehouseTransfer::class,
-                    'reference_id' => $warehouseTransfer->id,
-                    'description' => 'قيمة مخزون مستلم من المخزن ' . $fromWarehouse->name,
-                    'created_by' => auth()->id(),
+
+                return ['value' => round($totalValue, 2), 'transfer_id' => $warehouseTransfer->id];
+            });
+
+            return response()->json([
+                'result' => 'Success',
+                'message' => 'تم تحويل المنتجات وتحديث رصيد المخزنين بنجاح',
+                'inventory_value' => $result['value'],
+                'transfer_id' => $result['transfer_id'],
+                'status' => 200,
+            ]);
+        } catch (ValidationException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            return response()->json(['result' => 'Error', 'error' => $e->getMessage(), 'message' => $e->getMessage()], 422);
+        }
+    }
+
+    public function inventoryStore(Request $request)
+    {
+        DB::beginTransaction();
+
+        try {
+
+            $warehouse = Warehouse::findOrFail($request->warehouse_id);
+
+            foreach ($request->products as $item) {
+
+                $productId     = $item['product_id'];
+                $countedStock  = $item['counted_stock'];
+
+                // المنتج في المخزن
+                $product = $warehouse->products()
+                    ->where('products.id', $productId)
+                    ->withPivot('stock')
+                    ->first();
+
+                if (!$product) {
+                    continue; // أو throw لو تحب
+                }
+
+                $systemStock = $product->pivot->stock;
+                $difference  = $countedStock - $systemStock;
+
+                // تحديث الكمية للجرد
+                $warehouse->products()->updateExistingPivot(
+                    $productId,
+                    [
+                        'stock' => $countedStock
+                    ]
+                );
+
+                // (اختياري) سجل حركة الجرد
+                InventoryLog::create([
+                    'warehouse_id'   => $warehouse->id,
+                    'product_id'     => $productId,
+                    'system_stock'   => $systemStock,
+                    'counted_stock'  => $countedStock,
+                    'difference'     => $difference,
+                    'note'           => $request->note,
                 ]);
             }
 
