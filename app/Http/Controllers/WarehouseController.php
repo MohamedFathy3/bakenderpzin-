@@ -103,6 +103,7 @@ class WarehouseController extends BaseController
         $warehouseId = $warehouse->id;
 
         $products = $warehouse->products()
+            ->with(['units.colors.warehouseStocks' => fn ($query) => $query->where('warehouse_id', $warehouse->id)])
             ->withPivot('stock')
             ->wherePivot('stock', '>', 0)
             ->with([

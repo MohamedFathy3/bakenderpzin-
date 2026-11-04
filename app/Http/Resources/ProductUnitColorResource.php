@@ -14,7 +14,9 @@ class ProductUnitColorResource extends JsonResource
             'id'        => $this->id,
             'color_id'  => $this->color_id,
             'color'     => optional($this->color)->name,
-            'stock'     => $this->stock,
+            'stock'     => $this->relationLoaded('warehouseStocks')
+                ? (int) optional($this->warehouseStocks->first())->stock
+                : $this->stock,
             'warehouseStocks' => $this->whenLoaded('warehouseStocks', fn () => $this->warehouseStocks->map(fn ($warehouseStock) => [
                 'warehouse_id' => $warehouseStock->warehouse_id,
                 'stock' => (int) $warehouseStock->stock,
