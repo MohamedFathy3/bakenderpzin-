@@ -115,7 +115,7 @@ public function indexProduct(Request $request)
         $query = ProductWarehouse::with([
             'product.units.colors.warehouseStocks',
             'warehouse',
-        ]);
+        ])->whereHas('product');
         if ($request->filled('filters.branch_id')) {
             $branchId = $request->input('filters.branch_id');
             $query->whereHas('warehouse', fn ($warehouseQuery) => $warehouseQuery->where('branch_id', $branchId));
@@ -131,7 +131,15 @@ public function indexProduct(Request $request)
             });
         }
 
+        if ($request->filled('filters.warehouse_id')) {
+            $query->where('warehouse_id', (int) $request->input('filters.warehouse_id'));
+        }
+
 $items = $query->get()->map(function ($item) use ($request) {
+
+    if (!$item->product) {
+        return null;
+    }
 
     $productData = (new ProductResource($item->product))->resolve($request);
     $productData['units'] = collect($productData['units'] ?? [])->map(function ($unit) use ($item) {
@@ -163,7 +171,7 @@ $items = $query->get()->map(function ($item) use ($request) {
 
         'updated_at' => $item->updated_at,
     ];
-});
+})->filter()->values();
 
         return response()->json([
             'data' => $items,

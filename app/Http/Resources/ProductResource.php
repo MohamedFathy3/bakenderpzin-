@@ -42,7 +42,8 @@ class ProductResource extends JsonResource
 
                     'colors' => $unit->colors->map(function ($color) {
                         // ✅ لو الـ relation محمّلة، خُد منها — وإلا 0
-                        $loadedWarehouseStocks = $color->relationLoaded('warehouseStocks')
+                        $hasWarehouseContext = $color->relationLoaded('warehouseStocks');
+                        $loadedWarehouseStocks = $hasWarehouseContext
                             ? $color->warehouseStocks
                             : collect();
 
@@ -53,8 +54,8 @@ class ProductResource extends JsonResource
                             'id' => $color->id,
                             'color_id' => $color->color_id,
                             'color' => optional($color->color)->name,
-                            'stock' => (int) $color->stock,      // إجمالي كل المخازن
-                            'total_stock' => $color->total_stock,
+                            'stock' => $hasWarehouseContext ? $warehouseStock : (int) $color->stock,
+                            'total_stock' => $hasWarehouseContext ? (int) $color->stock : null,
                             'hex_code' => optional($color->color)->hex_code,
 
                             // ✅ نفس شكل WarehouseProductResource
