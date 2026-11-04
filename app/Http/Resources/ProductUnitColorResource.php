@@ -14,7 +14,11 @@ class ProductUnitColorResource extends JsonResource
             'color_id'  => $this->color_id,
             'color'     => optional($this->color)->name,
             'stock'     => $this->stock,
-                       'hex_code'  => optional($this->color)->hex_code,
+            'warehouseStocks' => $this->whenLoaded('warehouseStocks', fn () => $this->warehouseStocks->map(fn ($warehouseStock) => [
+                'warehouse_id' => $warehouseStock->warehouse_id,
+                'stock' => (int) $warehouseStock->stock,
+            ])->values()),
+            'hex_code'  => optional($this->color)->hex_code,
 
         ];
     }

@@ -17,4 +17,9 @@ class ProductUnitColor extends BaseModel
     {
         return $this->belongsTo(Color::class);
     }
+
+    public function warehouseStocks()
+    {
+        return $this->hasMany(WarehouseProductUnitColor::class, 'product_unit_color_id');
+    }
 }
