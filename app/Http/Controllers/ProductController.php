@@ -154,11 +154,11 @@ class ProductController extends BaseController
 
 public function show(Request $request, Product $product)
 {
-    $warehouseId = $request->query('warehouse_id');
+    $warehouseId = $request->integer('warehouse_id') ?: null;
 
     $product->load('warehouses', 'units.colors.color');
 
-    // ✅ احسب رصيد كل لون من المصدر الوحيد
+    // ضع رصيد كل لون داخل نفس علاقة warehouseStocks التي يستخدمها ProductResource.
     $product->units->each(function ($unit) use ($warehouseId) {
         $unit->colors->each(function ($color) use ($warehouseId) {
             $query = DB::table('product_unit_color_warehouse')
@@ -168,15 +168,23 @@ public function show(Request $request, Product $product)
                 $query->where('warehouse_id', $warehouseId);
             }
 
-            // ✅ الرقم الحقيقي من المصدر الوحيد
-            $color->warehouse_stock = (int) $query->sum('stock');
-            $color->warehouseStocks = $warehouseId
-                ? $query->get(['warehouse_id', 'stock'])
-                : collect();
+            $rows = $query->get(['warehouse_id', 'stock']);
+            if ($warehouseId) {
+                $color->setRelation(
+                    'warehouseStocks',
+                    $rows->map(function ($row) {
+                        return (object) [
+                            'warehouse_id' => (int) $row->warehouse_id,
+                            'stock' => (int) $row->stock,
+                        ];
+                    })
+                );
+            }
+            $color->warehouse_stock = (int) $rows->sum('stock');
         });
     });
 
-    // ✅ رصيد المنتج = مجموع ألوانه (في المخزن المحدد أو كل المخازن)
+    // رصيد المنتج = مجموع أرصدة متغيراته في المخزن المحدد أو كل المخازن.
     $product->stock = $product->units->sum(function ($unit) {
         return $unit->colors->sum('warehouse_stock');
     });
