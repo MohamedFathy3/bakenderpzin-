@@ -136,8 +136,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
 Route::get('warehouses/{warehouse}/products', [WarehouseController::class, 'warehouseProducts']);
 Route::post('warehouses/transfer', [WarehouseController::class, 'transfer']);
-Route::post('warehouses/inventory-store', [WarehouseController::class, 'inventoryStore']);
-Route::put('inventory-logs/{inventoryLog}/counted-stock', [WarehouseController::class, 'updateCountedStock']);
+Route::post('warehouses/inventory-store', [InventoryLogController::class, 'inventoryStore']);
+Route::put('inventory-logs/{inventoryLog}/counted-stock', [InventoryLogController::class, 'updateCountedStock']);
 Route::get('inventory-logs/{inventoryLog}', [InventoryLogController::class, 'show']);
 Route::post('/inventory/index', [InventoryLogController::class, 'index']);
 Route::post('/warehouses/index-product', [InventoryLogController::class, 'indexProduct']);
