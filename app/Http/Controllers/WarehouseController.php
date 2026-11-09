@@ -303,6 +303,9 @@ class WarehouseController extends BaseController
                     if ($affected !== 1) {
                         throw new \RuntimeException("فشل خصم المخزون من المخزن المصدر. Product: {$productId}");
                     }
+                    DB::table('product_warehouse')
+                        ->where('id', $source->id)
+                        ->update(['updated_at' => now()]);
 
                     $destination = DB::table('product_warehouse')
                         ->where('warehouse_id', $toId)
@@ -314,6 +317,9 @@ class WarehouseController extends BaseController
                         DB::table('product_warehouse')
                             ->where('id', $destination->id)
                             ->increment('stock', $quantity);
+                        DB::table('product_warehouse')
+                            ->where('id', $destination->id)
+                            ->update(['updated_at' => now()]);
 
                         if ($destination->cost === null && $source->cost !== null) {
                             DB::table('product_warehouse')
@@ -376,6 +382,11 @@ class WarehouseController extends BaseController
                 foreach ($affectedProductIds as $pid) {
                     ProductUnitColorWarehouse::syncProduct((int) $pid);
                 }
+
+                DB::table('product_warehouse')
+                    ->whereIn('product_id', $affectedProductIds->all())
+                    ->whereIn('warehouse_id', [$fromId, $toId])
+                    ->update(['updated_at' => now()]);
 
                 // 8) سجل التحويل
                 $warehouseTransfer = WarehouseTransfer::create([
@@ -485,24 +496,6 @@ class WarehouseController extends BaseController
                 'status' => 422,
             ], 422);
         }
-    }
-
-    public function transfers()
-    {
-        $transfers = WarehouseTransfer::query()
-            ->with([
-                'sourceWarehouse:id,name,name_ar',
-                'destinationWarehouse:id,name,name_ar',
-            ])
-            ->orderByDesc('created_at')
-            ->limit(100)
-            ->get();
-
-        return response()->json([
-            'result' => 'Success',
-            'data' => $transfers,
-            'status' => 200,
-        ]);
     }
 
     public function inventoryStore(Request $request)

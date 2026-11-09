@@ -298,6 +298,8 @@ class InventoryLogController extends BaseController
                 $query->where('warehouse_id', (int) $request->input('filters.warehouse_id'));
             }
 
+            $query->orderByDesc('updated_at')->orderByDesc('id');
+
             $items = $query->get()->map(function ($item) use ($request) {
                 if (!$item->product) {
                     return null;
