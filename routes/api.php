@@ -1,5 +1,6 @@
-<?php
 
+<?php
+use App\Http\Controllers\WarehouseTransferController;
 use App\Http\Controllers\AccountController;
 use App\Http\Controllers\ActivityLogController;
 use App\Http\Controllers\AdminController;
@@ -9,6 +10,7 @@ use App\Http\Controllers\BranchController;
 use App\Http\Controllers\CashierShiftController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\ClearDataController;
+use App\Http\Controllers\WarehouseController;
 use App\Http\Controllers\ColorController;
 use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
@@ -39,7 +41,6 @@ use App\Http\Controllers\TransferController;
 use App\Http\Controllers\TreasuryController;
 use App\Http\Controllers\UnitController;
 use App\Http\Controllers\UserController;
-use App\Http\Controllers\WarehouseController;
 use App\Http\Controllers\WarehouseInventoryReportController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -132,6 +133,27 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('warehouse', WarehouseController::class);
 });
 //////////////////////////////////////// warehouse ////////////////////////////////
+Route::middleware(['auth:sanctum'])->prefix('warehouses')->group(function () {
+    Route::get('transfers', [WarehouseTransferController::class, 'index']);
+    Route::get('transfers/{id}', [WarehouseTransferController::class, 'show'])
+        ->whereNumber('id');
+});
+Route::middleware(['auth:sanctum'])->group(function () {
+    Route::get('warehouses/transfers', [
+        WarehouseTransferController::class,
+        'index'
+    ]);
+
+    Route::get('warehouses/transfers/{id}', [
+        WarehouseTransferController::class,
+        'show'
+    ])->whereNumber('id');
+
+    Route::post('warehouses/transfer', [
+        WarehouseController::class,
+        'transfer'
+    ]);
+});
 //////////////////////////////////////// warehouse ////////////////////////////////
 
 Route::get('warehouses/{warehouse}/products', [WarehouseController::class, 'warehouseProducts']);

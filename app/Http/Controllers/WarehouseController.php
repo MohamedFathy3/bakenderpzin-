@@ -1,7 +1,7 @@
 <?php
 
 namespace App\Http\Controllers;
-
+use App\Models\ProductWarehouse;
 use App\Helpers\JsonResponse;
 use App\Http\Requests\WarehouseRequest;
 use App\Http\Resources\WarehouseProductResource;
@@ -28,11 +28,39 @@ class WarehouseController extends BaseController
         $this->crudRepository = $pattern;
     }
 
-    public function index()
+    /**
+     * ✅ FIX #1: index() بيدعم الفلاتر (active, branch_id) + ترتيب + pagination
+     */
+    public function index(Request $request)
     {
         try {
-            $warehouse = WarehouseResource::collection($this->crudRepository->all([], [], ['*']));
-            return $warehouse->additional(JsonResponse::success());
+            $query = Warehouse::query();
+
+            if ($request->has('filters.active') && $request->input('filters.active') !== null) {
+                $query->where('active', (bool) $request->input('filters.active'));
+            }
+
+            if ($request->filled('filters.branch_id')) {
+                $query->where('branch_id', (int) $request->input('filters.branch_id'));
+            }
+
+            if ($request->filled('filters.name')) {
+                $name = $request->input('filters.name');
+                $query->where(function ($q) use ($name) {
+                    $q->where('name', 'LIKE', "%{$name}%")
+                      ->orWhere('name_ar', 'LIKE', "%{$name}%");
+                });
+            }
+
+            $orderBy = $request->input('orderBy', 'id');
+            $orderDir = $request->input('orderByDirection', 'asc');
+            $query->orderBy($orderBy, $orderDir);
+
+            $rows = $request->boolean('paginate', false)
+                ? $query->paginate((int) $request->input('perPage', 15))
+                : $query->get();
+
+            return WarehouseResource::collection($rows)->additional(JsonResponse::success());
         } catch (Exception $e) {
             return JsonResponse::respondError($e->getMessage());
         }
@@ -98,35 +126,160 @@ class WarehouseController extends BaseController
         }
     }
 
+    /**
+     * ✅ FIX #3: warehouseProducts - stock على مستوى المنتج =
+     *    - pivot.stock لو مفيش variants
+     *    - مجموع warehouse_stock للألوان لو فيه variants
+     *    + color.warehouse_stock و color.stock = نفس الرقم
+     */
     public function warehouseProducts(Warehouse $warehouse)
     {
         $warehouseId = $warehouse->id;
 
         $products = $warehouse->products()
-            ->with(['units.colors.warehouseStocks' => fn ($query) => $query->where('warehouse_id', $warehouse->id)])
-            ->withPivot('stock')
-            ->wherePivot('stock', '>', 0)
             ->with([
                 'units.colors.color',
                 'units.colors.warehouseStocks' => function ($query) use ($warehouseId) {
                     $query->where('warehouse_id', $warehouseId);
                 },
             ])
+            ->withPivot('stock')
+            ->wherePivot('stock', '>', 0)
             ->get();
 
-        // إضافة warehouse_stock على كل لون
-        $products->each(function ($product) {
-            $product->units->each(function ($unit) {
-                $unit->colors->each(function ($color) {
+        $products->each(function ($product) use ($warehouseId) {
+            $variantSum = 0;
+            $hasUnits = $product->units->isNotEmpty();
+
+            $product->units->each(function ($unit) use ($warehouseId, &$variantSum) {
+                $unit->colors->each(function ($color) use ($warehouseId, &$variantSum) {
                     $ws = $color->warehouseStocks->first();
                     $color->warehouse_stock = $ws ? (int) $ws->stock : 0;
+                    // ✅ stock على مستوى اللون = warehouse_stock (مش الإجمالي)
+                    $color->stock = $color->warehouse_stock;
+                    $variantSum += $color->warehouse_stock;
                 });
             });
+
+            // ✅ stock على مستوى المنتج = متطابق مع computeEffectiveStock في الفرونت
+            $product->stock = $hasUnits
+                ? $variantSum
+                : (int) ($product->pivot->stock ?? 0);
+
+            // للحفاظ على pivot_stock الأصلي لو احتاجه العميل
+            $product->warehouse_stock = (int) ($product->pivot->stock ?? 0);
         });
 
         return WarehouseProductResource::collection($products);
     }
 
+    /**
+     * ✅ FIX #3: indexProduct - نفس المنطق في warehouseProducts
+     *    + إضافة warehouse_id و product_id صريحة
+     */
+    public function indexProduct(Request $request)
+    {
+        try {
+            $query = ProductWarehouse::with([
+                'product.units.colors.warehouseStocks',
+                'warehouse',
+            ])->whereHas('product');
+
+            if ($request->filled('filters.branch_id')) {
+                $branchId = $request->input('filters.branch_id');
+                $query->whereHas('warehouse', fn ($wq) => $wq->where('branch_id', $branchId));
+            }
+
+            if ($request->filled('filters.warehouse_name')) {
+                $warehouseName = $request->input('filters.warehouse_name');
+                $query->whereHas('warehouse', function ($q) use ($warehouseName) {
+                    $q->where('name', 'LIKE', "%{$warehouseName}%");
+                });
+            }
+
+            if ($request->filled('filters.warehouse_id')) {
+                $query->where('warehouse_id', (int) $request->input('filters.warehouse_id'));
+            }
+
+            if ($request->filled('filters.barcode')) {
+                $barcode = $request->input('filters.barcode');
+                $query->whereHas('product', function ($q) use ($barcode) {
+                    $q->where('barcode', 'LIKE', "%{$barcode}%");
+                });
+            }
+
+            if ($request->filled('filters.product_name')) {
+                $name = $request->input('filters.product_name');
+                $query->whereHas('product', function ($q) use ($name) {
+                    $q->where('name', 'LIKE', "%{$name}%")
+                      ->orWhere('name_ar', 'LIKE', "%{$name}%");
+                });
+            }
+
+            $query->orderByDesc('updated_at')->orderByDesc('id');
+
+            $items = $query->get()->map(function ($item) use ($request) {
+                if (!$item->product) return null;
+
+                $productData = (new \App\Http\Resources\ProductResource($item->product))->resolve($request);
+
+                $variantSum = 0;
+                $hasUnits = !empty($productData['units']);
+
+                $productData['units'] = collect($productData['units'] ?? [])->map(function ($unit) use ($item, &$variantSum) {
+                    $unit['colors'] = collect($unit['colors'] ?? [])->map(function ($color) use ($item, &$variantSum) {
+                        $warehouseStock = collect($color['warehouseStocks'] ?? [])
+                            ->firstWhere('warehouse_id', (int) $item->warehouse_id);
+
+                        $color['warehouse_stock'] = (int) ($warehouseStock['stock'] ?? 0);
+                        // ✅ stock على مستوى اللون = نفس الرقم
+                        $color['stock'] = $color['warehouse_stock'];
+
+                        $variantSum += $color['warehouse_stock'];
+                        return $color;
+                    })->values()->all();
+                    return $unit;
+                })->values()->all();
+
+                // ✅ stock على مستوى المنتج = متطابق مع computeEffectiveStock
+                $displayStock = $hasUnits ? $variantSum : (int) $item->stock;
+
+                return [
+                    'id'              => $item->id,
+                    'product_id'      => $item->product->id,
+                    'product_name'    => $item->product?->name,
+                    'name'            => $item->product?->name,
+                    'barcode'         => $item->product?->barcode,
+                    'product'         => $item->product ? $productData : null,
+                    'warehouse_id'    => $item->warehouse_id,
+                    'warehouse_name'  => $item->warehouse?->name,
+                    'stock'           => $displayStock,
+                    'pivot_stock'     => (int) $item->stock,
+                    'cost'            => $item->cost,
+                    'created_at'      => $item->created_at,
+                    'updated_at'      => $item->updated_at,
+                ];
+            })->filter()->values();
+
+            return response()->json([
+                'data'   => $items,
+                'result' => 'Success',
+                'message'=> 'Product warehouse list fetched successfully',
+                'status' => 200,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'result'  => 'Error',
+                'message' => $e->getMessage(),
+                'status'  => 500,
+            ], 500);
+        }
+    }
+
+    /**
+     * ✅ FIX #2: transfer - إصلاح حساب unit_cost و total_cost
+     *    يستخدم نفس fallback زي inventory_value (source.cost → products.cost → 0)
+     */
     public function transfer(Request $request)
     {
         $validated = $request->validate([
@@ -145,7 +298,7 @@ class WarehouseController extends BaseController
                 $fromId = (int) $validated['from_warehouse_id'];
                 $toId = (int) $validated['to_warehouse_id'];
 
-                // 1) قفل المخزنين بترتيب ثابت لتفادي الـ deadlock
+                // 1) قفل المخزنين بترتيب ثابت
                 $ids = [$fromId, $toId];
                 sort($ids);
 
@@ -162,7 +315,7 @@ class WarehouseController extends BaseController
                     throw new \RuntimeException('المخزن غير موجود.');
                 }
 
-                // 2) تجميع الكميات حسب المنتج وحسب (مقاس + لون)
+                // 2) تجميع الكميات
                 $items = collect($validated['products']);
 
                 $totals = $items
@@ -178,7 +331,6 @@ class WarehouseController extends BaseController
                     $quantity = (int) $item['quantity'];
 
                     if ($unitId === 0 && $colorId === 0) {
-                        // منع التحويل الإجمالي لو المنتج له مقاسات وألوان
                         $hasColors = DB::table('product_units as pu')
                             ->join('product_unit_colors as puc', 'puc.product_unit_id', '=', 'pu.id')
                             ->where('pu.product_id', $productId)
@@ -205,13 +357,18 @@ class WarehouseController extends BaseController
                             'unit_id' => $unitId,
                             'color_id' => $colorId,
                             'quantity' => 0,
+                            'note' => null,
                         ];
                     }
                     $variantTotals[$key]['quantity'] += $quantity;
+                    if (!empty($item['note'])) {
+                        $variantTotals[$key]['note'] = $item['note'];
+                    }
                 }
 
-                // 3) التحقق من رصيد المنتجات في المخزن المصدر وحساب القيمة
+                // 3) التحقق من أرصدة المنتجات + حساب التكلفة الموحد
                 $stockRows = [];
+                $productCosts = []; // ✅ FIX #2: cache التكلفة لكل منتج
                 $totalValue = 0.0;
 
                 foreach ($totals as $productId => $quantity) {
@@ -225,16 +382,19 @@ class WarehouseController extends BaseController
                         throw new \RuntimeException("الكمية غير متاحة للتحويل في مخزن المصدر. Product: {$productId}");
                     }
 
+                    // ✅ FIX #2: نفس الـ fallback في كل مكان
                     $unitCost = $source->cost;
                     if ($unitCost === null) {
                         $unitCost = DB::table('products')->where('id', $productId)->value('cost');
                     }
+                    $unitCost = (float) ($unitCost ?? 0);
 
                     $stockRows[$productId] = $source;
-                    $totalValue += $quantity * (float) ($unitCost ?? 0);
+                    $productCosts[$productId] = $unitCost; // cache
+                    $totalValue += $quantity * $unitCost;
                 }
 
-                // 4) التحقق من أرصدة المقاس واللون في المخزن المصدر
+                // 4) التحقق من أرصدة الـ variants
                 $variantRows = [];
 
                 foreach ($variantTotals as $key => $variant) {
@@ -284,16 +444,22 @@ class WarehouseController extends BaseController
                     }
 
                     $variantRows[$key] = [
-                        'product_id' => $productId,
-                        'color_record_id' => $color->id,
-                        'source_stock_id' => $sourceColorStock->id,
-                        'quantity' => $quantity,
+                        'product_id'        => $productId,
+                        'unit_id'           => (int) $unit->id,
+                        'color_id'          => $colorId,
+                        'color_record_id'   => $color->id,
+                        'source_stock_id'   => $sourceColorStock->id,
+                        'source_before'     => (int) $sourceColorStock->stock,
+                        'quantity'          => $quantity,
+                        'note'              => $variant['note'],
                     ];
                 }
 
-                // 5) تحويل رصيد المنتجات
+                // 5) تحويل أرصدة المنتجات
+                $productDestSnapshots = [];
                 foreach ($totals as $productId => $quantity) {
                     $source = $stockRows[$productId];
+                    $sourceBefore = (int) $source->stock;
 
                     $affected = DB::table('product_warehouse')
                         ->where('id', $source->id)
@@ -312,6 +478,8 @@ class WarehouseController extends BaseController
                         ->where('product_id', $productId)
                         ->lockForUpdate()
                         ->first();
+
+                    $destBefore = $destination ? (int) $destination->stock : 0;
 
                     if ($destination) {
                         DB::table('product_warehouse')
@@ -336,12 +504,22 @@ class WarehouseController extends BaseController
                             'updated_at' => now(),
                         ]);
                     }
+
+                    $productDestSnapshots[$productId] = [
+                        'source_before'      => $sourceBefore,
+                        'source_after'       => $sourceBefore - $quantity,
+                        'destination_before' => $destBefore,
+                        'destination_after'  => $destBefore + $quantity,
+                    ];
                 }
 
-                // 6) تحويل رصيد المقاس واللون
+                // 6) تحويل أرصدة الـ variants
+                $transferItemsData = [];
+
                 foreach ($variantRows as $variant) {
                     $colorRecordId = $variant['color_record_id'];
                     $quantity = $variant['quantity'];
+                    $sourceBefore = $variant['source_before'];
 
                     $affected = DB::table('product_unit_color_warehouse')
                         ->where('id', $variant['source_stock_id'])
@@ -358,6 +536,8 @@ class WarehouseController extends BaseController
                         ->lockForUpdate()
                         ->first();
 
+                    $destBefore = $destination ? (int) $destination->stock : 0;
+
                     if ($destination) {
                         DB::table('product_unit_color_warehouse')
                             ->where('id', $destination->id)
@@ -371,9 +551,26 @@ class WarehouseController extends BaseController
                             'updated_at' => now(),
                         ]);
                     }
+
+                    // ✅ FIX #2: استخدام نفس التكلفة المخزنة
+                    $productCost = $productCosts[$variant['product_id']] ?? 0.0;
+
+                    $transferItemsData[] = [
+                        'product_id'         => $variant['product_id'],
+                        'product_unit_id'    => $variant['unit_id'],
+                        'color_id'           => $variant['color_id'],
+                        'quantity'           => $quantity,
+                        'source_before'      => $sourceBefore,
+                        'source_after'       => $sourceBefore - $quantity,
+                        'destination_before' => $destBefore,
+                        'destination_after'  => $destBefore + $quantity,
+                        'unit_cost'          => $productCost,
+                        'total_cost'         => round($quantity * $productCost, 2),
+                        'note'               => $variant['note'],
+                    ];
                 }
 
-                // 7) مزامنة كل الـ aggregates (colors + product_warehouse + products.stock)
+                // 7) مزامنة الـ aggregates
                 $affectedProductIds = collect(array_column($variantRows, 'product_id'))
                     ->merge($totals->keys())
                     ->unique()
@@ -388,27 +585,89 @@ class WarehouseController extends BaseController
                     ->whereIn('warehouse_id', [$fromId, $toId])
                     ->update(['updated_at' => now()]);
 
-                // 8) سجل التحويل
-                $warehouseTransfer = WarehouseTransfer::create([
-                    'from_warehouse_id' => $fromId,
-                    'to_warehouse_id' => $toId,
-                    'inventory_value' => round($totalValue, 2),
-                    'created_by' => auth()->id(),
-                    'transfer_date' => now(),
+                // 8) رقم التحويل اليومي WHS-DDMMYYYY-N
+                $dateKey = now()->format('dmY');
+
+                DB::table('warehouse_transfer_sequences')->insertOrIgnore([
+                    'date_key'    => $dateKey,
+                    'last_number' => 0,
+                    'created_at'  => now(),
+                    'updated_at'  => now(),
                 ]);
 
-                $warehouseTransfer->update([
-                    'transfer_number' => 'WHS-' . now()->format('Ymd') . '-' . str_pad((string) $warehouseTransfer->id, 6, '0', STR_PAD_LEFT),
+                $sequenceRow = DB::table('warehouse_transfer_sequences')
+                    ->where('date_key', $dateKey)
+                    ->lockForUpdate()
+                    ->first();
+
+                $nextSequence = ((int) ($sequenceRow->last_number ?? 0)) + 1;
+
+                DB::table('warehouse_transfer_sequences')
+                    ->where('date_key', $dateKey)
+                    ->update([
+                        'last_number' => $nextSequence,
+                        'updated_at'  => now(),
+                    ]);
+
+                $warehouseTransfer = WarehouseTransfer::create([
+                    'transfer_number'   => "WHS-{$dateKey}-{$nextSequence}",
+                    'from_warehouse_id' => $fromId,
+                    'to_warehouse_id'   => $toId,
+                    'inventory_value'   => round($totalValue, 2),
+                    'created_by'        => auth()->id(),
+                    'transfer_date'     => now(),
                 ]);
+
+                // 8.5) حفظ تفاصيل التحويل
+                $now = now();
+                $rowsToInsert = [];
+
+                foreach ($transferItemsData as $item) {
+                    $rowsToInsert[] = array_merge($item, [
+                        'warehouse_transfer_id' => $warehouseTransfer->id,
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ]);
+                }
+
+                $variantProductIds = collect($transferItemsData)->pluck('product_id')->unique()->all();
+                foreach ($totals as $productId => $quantity) {
+                    if (in_array($productId, $variantProductIds, true)) continue;
+
+                    $snap = $productDestSnapshots[$productId] ?? null;
+                    if (!$snap) continue;
+
+                    // ✅ FIX #2: نفس التكلفة
+                    $productCost = $productCosts[$productId] ?? 0.0;
+
+                    $rowsToInsert[] = [
+                        'warehouse_transfer_id' => $warehouseTransfer->id,
+                        'product_id'            => $productId,
+                        'product_unit_id'       => null,
+                        'color_id'              => null,
+                        'quantity'              => (int) $quantity,
+                        'source_before'         => $snap['source_before'],
+                        'source_after'          => $snap['source_after'],
+                        'destination_before'    => $snap['destination_before'],
+                        'destination_after'     => $snap['destination_after'],
+                        'unit_cost'             => $productCost,
+                        'total_cost'            => round($quantity * $productCost, 2),
+                        'note'                  => null,
+                        'created_at'            => $now,
+                        'updated_at'            => $now,
+                    ];
+                }
+
+                if (!empty($rowsToInsert)) {
+                    DB::table('warehouse_transfer_items')->insert($rowsToInsert);
+                }
 
                 // 9) الخزائن
                 $treasuryFor = function ($branchId) {
                     $query = Treasury::query();
-
                     if ($branchId) {
                         $query->where('branch_id', $branchId);
                     }
-
                     return $query->orderByDesc('is_main')->orderBy('id')->lockForUpdate()->first()
                         ?? Treasury::where('is_main', true)->orderBy('id')->lockForUpdate()->first();
                 };
@@ -447,29 +706,31 @@ class WarehouseController extends BaseController
                 }
 
                 return [
-                    'transfer_id' => $warehouseTransfer->id,
+                    'transfer_id'     => $warehouseTransfer->id,
                     'transfer_number' => $warehouseTransfer->transfer_number,
-                    'transfer_date' => $warehouseTransfer->transfer_date,
-                    'value' => round($totalValue, 2),
-                    'products_count' => $totals->count(),
-                    'total_quantity' => (int) $totals->sum(),
+                    'transfer_date'   => $warehouseTransfer->transfer_date,
+                    'value'           => round($totalValue, 2),
+                    'products_count'  => $totals->count(),
+                    'total_quantity'  => (int) $totals->sum(),
+                    'items'           => $transferItemsData,
+                    'items_count'     => count($rowsToInsert),
                 ];
             }, 3);
 
             // 10) تحقق بعد الـ commit
             $verification = [
                 'from_warehouse_id' => (int) $validated['from_warehouse_id'],
-                'to_warehouse_id' => (int) $validated['to_warehouse_id'],
+                'to_warehouse_id'   => (int) $validated['to_warehouse_id'],
                 'products' => [],
             ];
 
             foreach (collect($validated['products'])->groupBy('product_id') as $productId => $rows) {
                 $verification['products'][$productId] = [
-                    'source_stock' => DB::table('product_warehouse')
+                    'source_stock' => (int) DB::table('product_warehouse')
                         ->where('product_id', $productId)
                         ->where('warehouse_id', $validated['from_warehouse_id'])
                         ->value('stock'),
-                    'destination_stock' => DB::table('product_warehouse')
+                    'destination_stock' => (int) DB::table('product_warehouse')
                         ->where('product_id', $productId)
                         ->where('warehouse_id', $validated['to_warehouse_id'])
                         ->value('stock'),
@@ -534,14 +795,11 @@ class WarehouseController extends BaseController
                         ->lockForUpdate()
                         ->first();
 
-                    if (!$pw) {
-                        continue;
-                    }
+                    if (!$pw) continue;
 
                     $systemStock = (int) $pw->stock;
 
                     if (!empty($item['variants'])) {
-                        // 1) تحديث رصيد كل لون في المخزن
                         foreach ($item['variants'] as $v) {
                             $colorRec = DB::table('product_unit_colors')
                                 ->where('product_unit_id', $v['product_unit_id'])
@@ -549,9 +807,7 @@ class WarehouseController extends BaseController
                                 ->whereNull('deleted_at')
                                 ->first();
 
-                            if (!$colorRec) {
-                                continue;
-                            }
+                            if (!$colorRec) continue;
 
                             DB::table('product_unit_color_warehouse')->updateOrInsert(
                                 [
@@ -566,16 +822,13 @@ class WarehouseController extends BaseController
                             );
                         }
 
-                        // 2) مزامنة كاملة
                         ProductUnitColorWarehouse::syncProduct($productId);
 
-                        // 3) قراءة الرصيد النهائي بعد المزامنة
                         $countedStock = (int) (DB::table('product_warehouse')
                             ->where('warehouse_id', $warehouseId)
                             ->where('product_id', $productId)
                             ->value('stock') ?? 0);
                     } else {
-                        // منتج بدون ألوان
                         $countedStock = (int) ($item['counted_stock'] ?? 0);
 
                         DB::table('product_warehouse')
