@@ -487,6 +487,24 @@ class WarehouseController extends BaseController
         }
     }
 
+    public function transfers()
+    {
+        $transfers = WarehouseTransfer::query()
+            ->with([
+                'sourceWarehouse:id,name,name_ar',
+                'destinationWarehouse:id,name,name_ar',
+            ])
+            ->orderByDesc('created_at')
+            ->limit(100)
+            ->get();
+
+        return response()->json([
+            'result' => 'Success',
+            'data' => $transfers,
+            'status' => 200,
+        ]);
+    }
+
     public function inventoryStore(Request $request)
     {
         $request->validate([
