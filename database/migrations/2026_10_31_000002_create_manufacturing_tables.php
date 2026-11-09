@@ -73,21 +73,36 @@ return new class extends Migration
             });
         }
 
-        if (!Schema::hasTable('manufacturing_order_status_histories')) {
-            Schema::create('manufacturing_order_status_histories', function (Blueprint $t) {
-            $t->id();
-            $t->foreignId('manufacturing_order_id')->constrained()->cascadeOnDelete();
-            $t->string('from_status')->nullable();
-            $t->string('to_status');
-            $t->text('reason')->nullable();
-            $t->foreignId('created_by')->nullable()->constrained('users')->nullOnDelete();
-            $t->string('idempotency_key')->nullable();
-            $t->softDeletes();
-            $t->timestamps();
-            $t->unique(['manufacturing_order_id', 'idempotency_key'], 'mfg_hist_order_idem_uq');
-            });
-        }
+  if (!Schema::hasTable('manufacturing_order_status_histories')) {
+    Schema::create('manufacturing_order_status_histories', function (Blueprint $t) {
+        $t->id();
 
+        $t->unsignedBigInteger('manufacturing_order_id');
+
+        $t->foreign('manufacturing_order_id', 'mfg_hist_order_fk')
+            ->references('id')
+            ->on('manufacturing_orders')
+            ->cascadeOnDelete();
+
+        $t->string('from_status')->nullable();
+        $t->string('to_status');
+        $t->text('reason')->nullable();
+
+        $t->foreignId('created_by')
+            ->nullable()
+            ->constrained('users')
+            ->nullOnDelete();
+
+        $t->string('idempotency_key')->nullable();
+        $t->softDeletes();
+        $t->timestamps();
+
+        $t->unique(
+            ['manufacturing_order_id', 'idempotency_key'],
+            'mfg_hist_order_idem_uq'
+        );
+    });
+}
         if (!Schema::hasTable('manufacturing_order_materials')) {
             Schema::create('manufacturing_order_materials', function (Blueprint $t) {
             $t->id();

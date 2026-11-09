@@ -139,60 +139,75 @@ class InventoryLogController extends BaseController
                         );
                     }
 
-                    if (!empty($data['variants'])) {
-                        // 2a) تحديث رصيد كل لون في المخزن
-                        foreach ($data['variants'] as $v) {
-                            // تحويل unit_id (نوع المقاس) → product_unit_id (سجل المقاس)
-                            $puRecordId = $v['product_unit_id'] ?? null;
+                  if (!empty($data['variants'])) {
+    foreach ($data['variants'] as $v) {
+        $puRecordId = $v['product_unit_id'] ?? null;
 
-                            if (!$puRecordId && !empty($v['unit_id'])) {
-                                $puRecordId = DB::table('product_units')
-                                    ->where('product_id', $productId)
-                                    ->where('unit_id', (int) $v['unit_id'])
-                                    ->whereNull('deleted_at')
-                                    ->value('id');
-                            }
+        if (!$puRecordId && !empty($v['unit_id'])) {
+            $puRecordId = DB::table('product_units')
+                ->where('product_id', $productId)
+                ->where('unit_id', (int) $v['unit_id'])
+                ->whereNull('deleted_at')
+                ->value('id');
+        }
+        if (!$puRecordId) {
+            throw new \RuntimeException("لم يتم العثور على سجل المقاس للمنتج [{$productId}].");
+        }
 
-                            if (!$puRecordId) {
-                                throw new \RuntimeException(
-                                    "لم يتم العثور على سجل المقاس للمنتج [{$productId}] (unit_id=" . ($v['unit_id'] ?? 'null') . ")."
-                                );
-                            }
+        $colorRec = DB::table('product_unit_colors')
+            ->where('product_unit_id', $puRecordId)
+            ->where('color_id', (int) $v['color_id'])
+            ->whereNull('deleted_at')
+            ->first();
+        if (!$colorRec) {
+            throw new \RuntimeException("اللون غير موجود: product_unit_id={$puRecordId}, color_id={$v['color_id']}.");
+        }
 
-                            $colorRec = DB::table('product_unit_colors')
-                                ->where('product_unit_id', $puRecordId)
-                                ->where('color_id', (int) $v['color_id'])
-                                ->whereNull('deleted_at')
-                                ->first();
+        $where = [
+            'warehouse_id'          => $warehouseId,
+            'product_unit_color_id' => $colorRec->id,
+        ];
 
-                            if (!$colorRec) {
-                                throw new \RuntimeException(
-                                    "اللون غير موجود للمنتج [{$productId}]: product_unit_id={$puRecordId}, color_id={$v['color_id']}."
-                                );
-                            }
+        // ✅ الرصيد القديم للـ variant نفسه (مش إجمالي المنتج)
+        $existing = DB::table('product_unit_color_warehouse')->where($where)->lockForUpdate()->first();
+        $variantSystem  = (int) ($existing->stock ?? 0);
+        $variantCounted = (int) $v['counted_stock'];
 
-                            DB::table('product_unit_color_warehouse')->updateOrInsert(
-                                [
-                                    'warehouse_id' => $warehouseId,
-                                    'product_unit_color_id' => $colorRec->id,
-                                ],
-                                [
-                                    'stock' => (int) $v['counted_stock'],
-                                    'updated_at' => now(),
-                                    'created_at' => now(),
-                                ]
-                            );
-                        }
+        if ($existing) {
+            DB::table('product_unit_color_warehouse')->where('id', $existing->id)
+                ->update(['stock' => $variantCounted, 'updated_at' => now()]);
+        } else {
+            DB::table('product_unit_color_warehouse')->insert($where + [
+                'stock' => $variantCounted, 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        }
 
-                        // 2b) مزامنة الـ aggregates (product_warehouse + products + colors)
-                        ProductUnitColorWarehouse::syncProduct($productId);
+        // ✅ سجل جرد لكل variant
+        InventoryLog::create([
+            'warehouse_id'    => $warehouseId,
+            'product_id'      => $productId,
+            'product_unit_id' => $puRecordId,
+            'color_id'        => (int) $v['color_id'],
+            'system_stock'    => $variantSystem,
+            'counted_stock'   => $variantCounted,
+            'difference'      => $variantCounted - $variantSystem,
+            'note'            => $request->note,
+        ]);
 
-                        // 2c) قراءة الرصيد النهائي بعد المزامنة
-                        $countedStock = (int) (DB::table('product_warehouse')
-                            ->where('warehouse_id', $warehouseId)
-                            ->where('product_id', $productId)
-                            ->value('stock') ?? 0);
-                    } else {
+        $processedProducts[] = [
+            'product_id'      => $productId,
+            'product_unit_id' => $puRecordId,
+            'color_id'        => (int) $v['color_id'],
+            'system_stock'    => $variantSystem,
+            'counted_stock'   => $variantCounted,
+            'difference'      => $variantCounted - $variantSystem,
+        ];
+    }
+
+    // مزامنة الإجماليات مرة واحدة بعد كل الـ variants
+    ProductUnitColorWarehouse::syncProduct($productId);
+    continue; // ✅ مهم: متكملش للـ InventoryLog::create القديم تحت
+} else {
                         // 2d) منتج بدون ألوان → تحديث مباشر
                         $countedStock = (int) ($data['counted_stock'] ?? 0);
 
@@ -327,14 +342,28 @@ class InventoryLogController extends BaseController
         }
     }
 
+private function groupLogs(InventoryLog $log)
+{
+    if (!$log->batch_id) {
+        return collect([$log]);
+    }
+
+    return InventoryLog::where('batch_id', $log->batch_id)
+        ->where('warehouse_id', $log->warehouse_id)
+        ->where('product_id', $log->product_id)
+        ->orderBy('id')
+        ->get();
+}
+
 public function show(InventoryLog $inventoryLog)
 {
     $inventoryLog->load(['warehouse', 'product']);
 
     $product     = $inventoryLog->product;
     $warehouseId = (int) $inventoryLog->warehouse_id;
+    $siblings    = $this->groupLogs($inventoryLog);
+    $isVariantLog = $inventoryLog->product_unit_id && $inventoryLog->color_id;
 
-    // ============ 1) بناء بيانات المنتج بنفس شكل /api/product/{id}?warehouse_id={wid} ============
     $productData = null;
 
     if ($product) {
@@ -347,97 +376,125 @@ public function show(InventoryLog $inventoryLog)
             'units'   => [],
         ];
 
-        // ----- المقاسات -----
-        $units = DB::table('product_units')
-            ->where('product_id', $product->id)
-            ->whereNull('deleted_at')
-            ->orderBy('id')
-            ->get(['id', 'unit_id']);
-
-        // ----- أسماء المقاسات من جدول units (مع fallback) -----
-        $unitNames = [];
-        $unitIds = $units->pluck('unit_id')->filter()->unique()->values()->all();
-        if (!empty($unitIds)) {
-            $unitRecords = DB::table('units')->whereIn('id', $unitIds)->get();
-            foreach ($unitRecords as $u) {
-                $arr = (array) $u;
-                $unitNames[$u->id] = $arr['name']
-                    ?? $arr['name_ar']
-                    ?? $arr['name_en']
-                    ?? $arr['unit_name']
-                    ?? $arr['code']
-                    ?? null;
-            }
-        }
-
-        // ----- الألوان (مع fallback أوسع) -----
         $colorRecords = DB::table('colors')->get()->keyBy('id');
 
-        // ----- لكل مقاس → ألوانه + مخزونها في المخزن المحدد -----
-        foreach ($units as $unit) {
-            $unitColors = DB::table('product_unit_colors')
-                ->where('product_unit_id', $unit->id)
-                ->whereNull('deleted_at')
-                ->orderBy('id')
-                ->get(['id', 'color_id']);
+        $unitName = function ($unitId) {
+            $u = DB::table('units')->where('id', $unitId)->first();
+            if (!$u) return null;
+            $arr = (array) $u;
+            return $arr['name'] ?? $arr['name_ar'] ?? $arr['name_en'] ?? $arr['unit_name'] ?? $arr['code'] ?? null;
+        };
 
-            $colorsData = [];
-            foreach ($unitColors as $colorRec) {
-                $warehouseStock = (int) (DB::table('product_unit_color_warehouse')
-                    ->where('warehouse_id', $warehouseId)
-                    ->where('product_unit_color_id', $colorRec->id)
-                    ->value('stock') ?? 0);
+        $colorMeta = function ($colorId) use ($colorRecords) {
+            $arr = ($m = $colorRecords->get($colorId)) ? (array) $m : [];
+            return [
+                'color'    => $arr['name'] ?? $arr['name_ar'] ?? $arr['name_en'] ?? $arr['color'] ?? null,
+                'hex_code' => $arr['hex_code'] ?? $arr['code'] ?? $arr['hex'] ?? null,
+            ];
+        };
 
-                $colorMeta = $colorRecords->get($colorRec->color_id);
-                $colorArr  = $colorMeta ? (array) $colorMeta : [];
+        if ($isVariantLog) {
+            // الـ variants اللي اتجردت في نفس الفورم فقط (بقيمها وقت الجرد)
+            foreach ($siblings->whereNotNull('product_unit_id')->groupBy('product_unit_id') as $puId => $logs) {
+                $pu = DB::table('product_units')->where('id', $puId)->first(['id', 'unit_id']);
+                if (!$pu) continue;
 
-                $colorsData[] = [
-                    'id'              => $colorRec->id,
-                    'color_id'        => $colorRec->color_id,
-                    'color'           => $colorArr['name']
-                        ?? $colorArr['name_ar']
-                        ?? $colorArr['name_en']
-                        ?? $colorArr['color']
-                        ?? null,
-                    'hex_code'        => $colorArr['hex_code']
-                        ?? $colorArr['code']
-                        ?? $colorArr['hex']
-                        ?? null,
-                    'stock'           => $warehouseStock,
-                    'warehouse_stock' => $warehouseStock,
+                $colorsData = [];
+                foreach ($logs as $log) {
+                    $colorRec = DB::table('product_unit_colors')
+                        ->where('product_unit_id', $puId)
+                        ->where('color_id', $log->color_id)
+                        ->whereNull('deleted_at')
+                        ->first(['id', 'color_id']);
+
+                    $meta = $colorMeta($log->color_id);
+
+                    $colorsData[] = [
+                        'id'              => $colorRec->id ?? null,
+                        'log_id'          => $log->id,
+                        'color_id'        => (int) $log->color_id,
+                        'color'           => $meta['color'],
+                        'hex_code'        => $meta['hex_code'],
+                        'system_stock'    => (int) $log->system_stock,
+                        'counted_stock'   => (int) $log->counted_stock,
+                        'stock'           => (int) $log->counted_stock,
+                        'warehouse_stock' => (int) $log->counted_stock,
+                    ];
+                }
+
+                $productData['units'][] = [
+                    'id'        => $pu->id,
+                    'unit_id'   => $pu->unit_id,
+                    'unit_name' => $unitName($pu->unit_id),
+                    'colors'    => $colorsData,
                 ];
             }
+        } else {
+            // سجلات قديمة بدون variant → كل المقاسات والألوان (السلوك القديم)
+            $units = DB::table('product_units')
+                ->where('product_id', $product->id)
+                ->whereNull('deleted_at')
+                ->orderBy('id')
+                ->get(['id', 'unit_id']);
 
-            $productData['units'][] = [
-                'id'        => $unit->id,
-                'unit_id'   => $unit->unit_id,
-                'unit_name' => $unitNames[$unit->unit_id] ?? null,
-                'colors'    => $colorsData,
-            ];
+            foreach ($units as $unit) {
+                $unitColors = DB::table('product_unit_colors')
+                    ->where('product_unit_id', $unit->id)
+                    ->whereNull('deleted_at')
+                    ->orderBy('id')
+                    ->get(['id', 'color_id']);
+
+                $colorsData = [];
+                foreach ($unitColors as $colorRec) {
+                    $stock = (int) (DB::table('product_unit_color_warehouse')
+                        ->where('warehouse_id', $warehouseId)
+                        ->where('product_unit_color_id', $colorRec->id)
+                        ->value('stock') ?? 0);
+
+                    $meta = $colorMeta($colorRec->color_id);
+
+                    $colorsData[] = [
+                        'id'              => $colorRec->id,
+                        'color_id'        => $colorRec->color_id,
+                        'color'           => $meta['color'],
+                        'hex_code'        => $meta['hex_code'],
+                        'system_stock'    => $stock,
+                        'counted_stock'   => $stock,
+                        'stock'           => $stock,
+                        'warehouse_stock' => $stock,
+                    ];
+                }
+
+                $productData['units'][] = [
+                    'id'        => $unit->id,
+                    'unit_id'   => $unit->unit_id,
+                    'unit_name' => $unitName($unit->unit_id),
+                    'colors'    => $colorsData,
+                ];
+            }
         }
     }
 
-    // ============ 2) الرصيد الحالي للمنتج في المخزن ============
     $currentProductStock = (int) (DB::table('product_warehouse')
         ->where('warehouse_id', $warehouseId)
         ->where('product_id', $inventoryLog->product_id)
         ->value('stock') ?? 0);
 
-    // ============ 3) الـ response ============
     return response()->json([
         'result'  => 'Success',
         'message' => 'Inventory log details fetched successfully',
         'data'    => [
             'id'        => $inventoryLog->id,
+            'ids'       => $siblings->pluck('id')->values(),
             'warehouse' => $inventoryLog->warehouse ? [
                 'id'      => $inventoryLog->warehouse->id,
                 'name'    => $inventoryLog->warehouse->name,
                 'name_ar' => $inventoryLog->warehouse->name_ar ?? null,
             ] : null,
-            'product'               => $productData,  // ← نفس شكل /api/product/{id}?warehouse_id={wid}
-            'system_stock'          => $inventoryLog->system_stock,
-            'counted_stock'         => $inventoryLog->counted_stock,
-            'difference'            => $inventoryLog->difference,
+            'product'               => $productData,
+            'system_stock'          => (int) $siblings->sum('system_stock'),
+            'counted_stock'         => (int) $siblings->sum('counted_stock'),
+            'difference'            => (int) $siblings->sum('difference'),
             'note'                  => $inventoryLog->note,
             'created_at'            => $inventoryLog->created_at,
             'current_product_stock' => $currentProductStock,
@@ -445,12 +502,13 @@ public function show(InventoryLog $inventoryLog)
         'status' => 200,
     ]);
 }
+
 public function updateCountedStock(Request $request, InventoryLog $inventoryLog)
 {
     $request->validate([
-        'counted_stock' => 'nullable|integer|min:0',
-        'note'          => 'nullable|string',
-        'variants'      => 'nullable|array',
+        'counted_stock'              => 'nullable|integer|min:0',
+        'note'                       => 'nullable|string',
+        'variants'                   => 'nullable|array',
         'variants.*.product_unit_id' => 'nullable|integer',
         'variants.*.unit_id'         => 'nullable|integer',
         'variants.*.color_id'        => 'required_with:variants|integer',
@@ -459,10 +517,12 @@ public function updateCountedStock(Request $request, InventoryLog $inventoryLog)
 
     try {
         DB::transaction(function () use ($request, $inventoryLog) {
-            $warehouseId = (int) $inventoryLog->warehouse_id;
-            $productId   = (int) $inventoryLog->product_id;
+            $warehouseId  = (int) $inventoryLog->warehouse_id;
+            $productId    = (int) $inventoryLog->product_id;
+            $siblings     = $this->groupLogs($inventoryLog);
+            $isVariantLog = $inventoryLog->product_unit_id && $inventoryLog->color_id;
+            $note         = $request->note ?? $inventoryLog->note;
 
-            // هل المنتج عنده ألوان/مقاسات؟
             $hasColors = DB::table('product_unit_colors as c')
                 ->join('product_units as u', 'u.id', '=', 'c.product_unit_id')
                 ->where('u.product_id', $productId)
@@ -471,12 +531,11 @@ public function updateCountedStock(Request $request, InventoryLog $inventoryLog)
 
             if ($hasColors) {
                 if (empty($request->variants)) {
-                    throw new \RuntimeException(
-                        'المنتج له ألوان ومقاسات، لازم ترسل تفاصيل كل لون (variants).'
-                    );
+                    throw new \RuntimeException('المنتج له ألوان ومقاسات، لازم ترسل تفاصيل كل لون (variants).');
                 }
 
-                // تحديث رصيد كل لون في المخزن
+                $updatedAny = false;
+
                 foreach ($request->variants as $v) {
                     $puRecordId = $v['product_unit_id'] ?? null;
 
@@ -494,6 +553,18 @@ public function updateCountedStock(Request $request, InventoryLog $inventoryLog)
                         );
                     }
 
+                    // لو الجرد على variants → عدّل بس اللي تابع لنفس الفورم
+                    $log = null;
+                    if ($isVariantLog) {
+                        $log = $siblings->first(fn ($l) =>
+                            (int) $l->product_unit_id === (int) $puRecordId
+                            && (int) $l->color_id === (int) $v['color_id']
+                        );
+                        if (!$log) {
+                            continue;
+                        }
+                    }
+
                     $colorRec = DB::table('product_unit_colors')
                         ->where('product_unit_id', $puRecordId)
                         ->where('color_id', (int) $v['color_id'])
@@ -506,44 +577,67 @@ public function updateCountedStock(Request $request, InventoryLog $inventoryLog)
                         );
                     }
 
+                    $counted = (int) $v['counted_stock'];
+
                     DB::table('product_unit_color_warehouse')->updateOrInsert(
                         [
-                            'warehouse_id' => $warehouseId,
+                            'warehouse_id'          => $warehouseId,
                             'product_unit_color_id' => $colorRec->id,
                         ],
                         [
-                            'stock'      => (int) $v['counted_stock'],
+                            'stock'      => $counted,
                             'updated_at' => now(),
-                            'created_at' => now(),
                         ]
                     );
+
+                    if ($log) {
+                        $log->update([
+                            'counted_stock' => $counted,
+                            'difference'    => $counted - (int) $log->system_stock,
+                            'note'          => $note,
+                        ]);
+                        $updatedAny = true;
+                    }
+                }
+
+                if ($isVariantLog && !$updatedAny) {
+                    throw new \RuntimeException('لم يتم إرسال بيانات الـ variants الخاصة بهذا الجرد.');
                 }
 
                 ProductUnitColorWarehouse::syncProduct($productId);
 
-                $countedStock = (int) (DB::table('product_warehouse')
-                    ->where('warehouse_id', $warehouseId)
-                    ->where('product_id', $productId)
-                    ->value('stock') ?? 0);
+                if (!$isVariantLog) {
+                    // سجل قديم بدون variant → إجمالي المنتج
+                    $total = (int) (DB::table('product_warehouse')
+                        ->where('warehouse_id', $warehouseId)
+                        ->where('product_id', $productId)
+                        ->value('stock') ?? 0);
+
+                    $inventoryLog->update([
+                        'counted_stock' => $total,
+                        'note'          => $note,
+                        'difference'    => $total - $inventoryLog->system_stock,
+                    ]);
+                }
             } else {
-                $countedStock = (int) ($request->counted_stock ?? 0);
+                $counted = (int) ($request->counted_stock ?? 0);
 
                 DB::table('product_warehouse')
                     ->where('warehouse_id', $warehouseId)
                     ->where('product_id', $productId)
                     ->update([
-                        'stock'      => $countedStock,
+                        'stock'      => $counted,
                         'updated_at' => now(),
                     ]);
 
                 ProductUnitColorWarehouse::syncProduct($productId);
-            }
 
-            $inventoryLog->update([
-                'counted_stock' => $countedStock,
-                'note'          => $request->note ?? $inventoryLog->note,
-                'difference'    => $countedStock - $inventoryLog->system_stock,
-            ]);
+                $inventoryLog->update([
+                    'counted_stock' => $counted,
+                    'note'          => $note,
+                    'difference'    => $counted - $inventoryLog->system_stock,
+                ]);
+            }
         });
 
         return response()->json([

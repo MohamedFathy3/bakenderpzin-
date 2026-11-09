@@ -32,8 +32,8 @@ class SalesInvoiceResource extends JsonResource
             'tax' => $this->tax?->name,
 
             'payment_method' => $this->payment_method,
-            'invoice_date' => $this->invoice_date,
-            'due_date' => $this->due_date,
+            'invoice_date' => $this->invoice_date?->format('Y-m-d'),
+            'due_date' => $this->due_date?->format('Y-m-d'),
             'note' => $this->note,
 
             'total_amount' => number_format($this->total_amount, 2, '.', ''),
@@ -47,28 +47,28 @@ class SalesInvoiceResource extends JsonResource
                 $originalPrice = $item->price * $item->quantity;
                 $discountAmount = $originalPrice - $item->total;
                 $discountPercentage = ($originalPrice > 0) ? ($discountAmount / $originalPrice) * 100 : 0;
-                
+
                 return [
                     'id' => $item->id,
                     'product_id' => $item->product_id,
                     'product_name' => $item->product?->name,
-                    
+
                     'product_unit_id' => $item->product_unit_id,
                     'unit_name' => $item->unit?->name,
-                    
+
                     'color_id' => $item->color_id,
                     'color_name' => $item->color?->name,
-                    
+
                     'quantity' => $item->quantity,
                     'price' => number_format($item->price, 2, '.', ''),
                     'cost_price' => number_format($item->cost_price ?? $item->product?->cost ?? 0, 2, '.', ''),
                     'cost_is_estimated' => $item->cost_price === null,
                     'discount_percentage' => number_format(
-                        $item->discount_percentage > 0 ? $item->discount_percentage : $discountPercentage, 
+                        $item->discount_percentage > 0 ? $item->discount_percentage : $discountPercentage,
                         2, '.', ''
                     ),
                     'discount_amount' => number_format(
-                        $item->discount_amount > 0 ? $item->discount_amount : $discountAmount, 
+                        $item->discount_amount > 0 ? $item->discount_amount : $discountAmount,
                         2, '.', ''
                     ),
                     'total' => number_format($item->total, 2, '.', ''),
