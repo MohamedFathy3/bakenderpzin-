@@ -394,6 +394,11 @@ class WarehouseController extends BaseController
                     'to_warehouse_id' => $toId,
                     'inventory_value' => round($totalValue, 2),
                     'created_by' => auth()->id(),
+                    'transfer_date' => now(),
+                ]);
+
+                $warehouseTransfer->update([
+                    'transfer_number' => 'WHS-' . now()->format('Ymd') . '-' . str_pad((string) $warehouseTransfer->id, 6, '0', STR_PAD_LEFT),
                 ]);
 
                 // 9) الخزائن
@@ -443,6 +448,8 @@ class WarehouseController extends BaseController
 
                 return [
                     'transfer_id' => $warehouseTransfer->id,
+                    'transfer_number' => $warehouseTransfer->transfer_number,
+                    'transfer_date' => $warehouseTransfer->transfer_date,
                     'value' => round($totalValue, 2),
                     'products_count' => $totals->count(),
                     'total_quantity' => (int) $totals->sum(),
@@ -478,6 +485,8 @@ class WarehouseController extends BaseController
                 'verification' => $verification,
                 'inventory_value' => $result['value'],
                 'transfer_id' => $result['transfer_id'],
+                'transfer_number' => $result['transfer_number'],
+                'transfer_date' => $result['transfer_date'],
                 'status' => 200,
             ], 200);
         } catch (ValidationException $e) {
