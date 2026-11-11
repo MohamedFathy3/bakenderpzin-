@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class InventoryLog extends BaseModel
 {
     protected $guarded = ['id'];
-    
+
     public function warehouse()
     {
         return $this->belongsTo(Warehouse::class)->withTrashed();
@@ -16,5 +16,10 @@ class InventoryLog extends BaseModel
     public function product()
     {
         return $this->belongsTo(Product::class)->withTrashed();
+    }
+
+    public function count()
+    {
+        return $this->belongsTo(InventoryCount::class, 'inventory_count_id');
     }
 }

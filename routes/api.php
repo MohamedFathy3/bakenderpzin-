@@ -11,6 +11,7 @@ use App\Http\Controllers\CashierShiftController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\ClearDataController;
 use App\Http\Controllers\WarehouseController;
+use App\Http\Controllers\InventoryCountController;
 use App\Http\Controllers\ColorController;
 use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
@@ -158,14 +159,20 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
 Route::get('warehouses/{warehouse}/products', [WarehouseController::class, 'warehouseProducts']);
 Route::post('warehouses/transfer', [WarehouseController::class, 'transfer']);
-Route::post('warehouses/inventory-store', [InventoryLogController::class, 'inventoryStore']);
-Route::put('inventory-logs/{inventoryLog}/counted-stock', [InventoryLogController::class, 'updateCountedStock']);
-Route::get('inventory-logs/{inventoryLog}', [InventoryLogController::class, 'show']);
 Route::post('/inventory/index', [InventoryLogController::class, 'index']);
-Route::post('/warehouses/index-product', [InventoryLogController::class, 'indexProduct']);
 Route::middleware(['auth:sanctum'])->get('/inventory/warehouse-report', [WarehouseInventoryReportController::class, 'index']);
 Route::middleware(['auth:sanctum'])->get('/system/alerts', [SystemAlertController::class, 'index']);
-
+Route::middleware(['auth:sanctum'])->group(function () {
+    // حفظ جرد جديد (مستند واحد)
+    Route::post('warehouses/inventory-store', [InventoryLogController::class, 'inventoryStore']);
+    Route::post('/inventory/index', [InventoryLogController::class, 'index']);
+    Route::post('/warehouses/index-product', [InventoryLogController::class, 'indexProduct']);
+ 
+    // مستندات الجرد: قائمة / تفاصيل / تعديل
+    Route::post('inventory-counts/index', [InventoryCountController::class, 'index']);
+    Route::get('inventory-counts/{inventoryCount}', [InventoryCountController::class, 'show']);
+    Route::put('inventory-counts/{inventoryCount}', [InventoryCountController::class, 'update']);
+});
 //////////////////////////////////////// color ////////////////////////////////
 
 Route::middleware(['auth:sanctum'])->group(function () {
