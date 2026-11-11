@@ -1,5 +1,6 @@
 <?php
 
+
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
@@ -28,8 +29,8 @@ class WarehouseTransferController extends Controller
             ->leftJoin('users as creator', 'creator.id', '=', 'wt.created_by')
             ->select([
                 'wt.id',
-                'wt.transfer_number',
-                'wt.transfer_date',
+                'wt.id as transfer_number',
+                'wt.created_at as transfer_date',
                 'wt.from_warehouse_id',
                 'wt.to_warehouse_id',
                 'wt.inventory_value',
@@ -56,19 +57,17 @@ class WarehouseTransferController extends Controller
                     );
             }, 'total_quantity');
 
-        // البحث برقم المستند أو اسم المخزن أو اسم المستخدم
         if (!empty($validated['search'])) {
             $search = trim($validated['search']);
 
             $query->where(function ($q) use ($search) {
-                $q->where('wt.transfer_number', 'like', "%{$search}%")
+                $q->where('wt.id', 'like', "%{$search}%")
                     ->orWhere('source.name', 'like', "%{$search}%")
                     ->orWhere('destination.name', 'like', "%{$search}%")
                     ->orWhere('creator.name', 'like', "%{$search}%");
             });
         }
 
-        // فلتر مخزن المصدر
         if (!empty($validated['from_warehouse_id'])) {
             $query->where(
                 'wt.from_warehouse_id',
@@ -76,7 +75,6 @@ class WarehouseTransferController extends Controller
             );
         }
 
-        // فلتر مخزن الوجهة
         if (!empty($validated['to_warehouse_id'])) {
             $query->where(
                 'wt.to_warehouse_id',
@@ -84,19 +82,17 @@ class WarehouseTransferController extends Controller
             );
         }
 
-        // فلتر التاريخ من
         if (!empty($validated['date_from'])) {
             $query->whereDate(
-                'wt.transfer_date',
+                'wt.created_at',
                 '>=',
                 $validated['date_from']
             );
         }
 
-        // فلتر التاريخ إلى
         if (!empty($validated['date_to'])) {
             $query->whereDate(
-                'wt.transfer_date',
+                'wt.created_at',
                 '<=',
                 $validated['date_to']
             );
@@ -105,7 +101,7 @@ class WarehouseTransferController extends Controller
         $perPage = (int) ($validated['per_page'] ?? 15);
 
         $transfers = $query
-            ->orderByDesc('wt.transfer_date')
+            ->orderByDesc('wt.created_at')
             ->orderByDesc('wt.id')
             ->paginate($perPage);
 
@@ -137,6 +133,8 @@ class WarehouseTransferController extends Controller
             ->where('wt.id', $id)
             ->select([
                 'wt.*',
+                'wt.id as transfer_number',
+                'wt.created_at as transfer_date',
                 'source.name as source_warehouse_name',
                 'destination.name as destination_warehouse_name',
                 'creator.name as creator_name',
