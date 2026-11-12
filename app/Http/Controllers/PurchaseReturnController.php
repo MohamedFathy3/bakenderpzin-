@@ -27,7 +27,7 @@ class PurchaseReturnController extends Controller
             $paginate = $request->boolean('paginate', true);
 
             $query = PurchaseReturn::with([
-                'purchaseInvoice',
+                'purchaseInvoice.supplier',
                 'items.product',
                 'items.color',
                 'items.unit',

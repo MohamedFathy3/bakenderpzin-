@@ -15,6 +15,7 @@ class PurchaseReturnResource extends JsonResource
 
             'purchase_invoices_id' => $this->purchase_invoices_id,
             'invoice_number' => optional($this->purchaseInvoice)->invoice_number,
+            'supplier_name' => optional(optional($this->purchaseInvoice)->supplier)->name,
 
             'total_amount' => (float) $this->total_amount,
             'paid_amount' => (float) $this->paid_amount,

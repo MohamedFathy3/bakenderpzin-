@@ -13,6 +13,8 @@ class ReturnInvoiceResource extends JsonResource
             'id'            => $this->id,
             'return_number' => $this->return_number,
             'invoice_id'    => $this->invoice_id,
+            'invoice_number' => $this->invoice?->invoice_number,
+            'customer' => $this->invoice?->customer?->name,
 
             'total_amount'    => (float) $this->total_amount,
             'refunded_amount' => (float) $this->refunded_amount,
@@ -20,7 +22,7 @@ class ReturnInvoiceResource extends JsonResource
 
             'reason' => $this->reason,
 
-            'created_at' => $this->created_at->format('Y-m-d H:i'),
+            'created_at' => $this->created_at?->format('Y-m-d H:i'),
 
             'items' => $this->items->map(function ($item) {
                 $invoiceItems = $this->invoice?->items?->where('product_id', $item->product_id);
@@ -36,4 +38,3 @@ class ReturnInvoiceResource extends JsonResource
         ];
     }
 }
-
