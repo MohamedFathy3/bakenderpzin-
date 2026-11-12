@@ -23,14 +23,18 @@ class FinanceController extends BaseController
         $this->crudRepository = $pattern;
     }
 
-    public function index()
+    public function index(Request $request)
     {
         try {
-            $finances = $this->crudRepository->all(
-                [],
-                ['treasury', 'currency', 'branch'],
-                ['*']
-            );
+            $finances = Finance::with(['treasury', 'currency', 'branch'])
+                ->when($request->filled('date_from'), fn ($query) =>
+                    $query->whereDate('date', '>=', $request->input('date_from')))
+                ->when($request->filled('date_to'), fn ($query) =>
+                    $query->whereDate('date', '<=', $request->input('date_to')))
+                ->when($request->filled('branch_id'), fn ($query) =>
+                    $query->where('branch_id', $request->input('branch_id')))
+                ->latest('date')
+                ->get();
             
             $Finance = FinanceResource::collection($finances);
             return $Finance->additional(JsonResponse::success());

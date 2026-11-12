@@ -27,14 +27,12 @@ class AttendanceController extends BaseController
         try {
             $filters = $request->input('filters', []);
             $branchId = $filters['branch_id'] ?? $request->input('branch_id');
-            if (!$branchId) {
-                $attendance = AttendanceResource::collection($this->crudRepository->all([], [], ['*']));
-                return $attendance->additional(JsonResponse::success());
+            $query = Attendance::with('employee');
+            if ($branchId) {
+                $query->whereHas('employee', function ($employeeQuery) use ($branchId) {
+                    $employeeQuery->where('branch_id', $branchId);
+                });
             }
-
-            $query = Attendance::with('employee')->whereHas('employee', function ($employeeQuery) use ($branchId) {
-                $employeeQuery->where('branch_id', $branchId);
-            });
             foreach (['employee_id', 'date', 'status'] as $field) {
                 if (!empty($filters[$field])) $query->where($field, $filters[$field]);
             }
